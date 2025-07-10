@@ -15,7 +15,8 @@ from core.database import (
     load_block_by_name,
     delete_block_by_name,
     build_where_clauses,
-    execute_query
+    execute_query,
+    get_frequent_sequences # Добавляем импорт новой функции
 )
 
 # --- Управление состоянием ---
@@ -65,94 +66,68 @@ def cached_load_filter_set_names():
 def cached_load_block_names():
     return load_block_names(conn)
 
+@st.cache_data(ttl=3600)
+def cached_get_frequent_sequences(sequence_type, phrase_length):
+    return get_frequent_sequences(conn, sequence_type, phrase_length)
+
 # --- Диалоговые окна ---
-@st.dialog("Сгенерированный SQL-запрос")
-def show_sql_dialog():
-    st.code(st.session_state.last_query, language='sql')
-    if st.button("Закрыть"):
-        st.rerun()
+@st.dialog("Заполнить по шаблону")
+def fill_sequence_dialog(sequence_type):
+    if not st.session_state.selected_lengths:
+        st.warning("Сначала выберите длину фразы.")
+        if st.button("Закрыть"):
+            st.rerun()
+        return
 
-@st.dialog("Сохранить набор фильтров")
-def save_set_dialog():
-    name_to_save = st.text_input("Имя набора")
-    if st.button("Сохранить"):
-        if name_to_save:
-            if save_filter_set(conn, name_to_save, {"lengths": st.session_state.selected_lengths, "blocks": st.session_state.filter_blocks}):
-                st.toast("Набор сохранен!", icon="✅")
-                cached_load_filter_set_names.clear()
-                st.rerun()
-            else:
-                st.error("Ошибка сохранения набора.")
-        else:
-            st.warning("Введите имя.")
-    if st.button("Отмена"):
-        st.rerun()
+    if len(st.session_state.selected_lengths) > 1:
+        st.warning("Для заполнения по шаблону выберите только одну длину фразы.")
+        if st.button("Закрыть"):
+            st.rerun()
+        return
 
-@st.dialog("Загрузить набор фильтров")
-def load_set_dialog():
-    saved_names = cached_load_filter_set_names()
-    selected_name = st.selectbox("Выберите набор", ["-- Выберите --"] + saved_names)
-    load_btn_col, del_btn_col = st.columns(2)
-    if load_btn_col.button("Загрузить"):
-        if selected_name != "-- Выберите --":
-            loaded = load_filter_set_by_name(conn, selected_name)
-            if loaded:
-                st.session_state.selected_lengths = loaded.get("lengths", [])
-                st.session_state.filter_blocks = loaded.get("blocks", [])
-                st.rerun()
-            else:
-                st.error("Ошибка загрузки набора.")
-    if del_btn_col.button("Удалить"):
-        if selected_name != "-- Выберите --":
-            if delete_filter_set_by_name(conn, selected_name):
-                cached_load_filter_set_names.clear()
-                st.rerun()
-            else:
-                st.error("Ошибка удаления набора.")
-    if st.button("Отмена"):
-        st.rerun()
+    phrase_length = st.session_state.selected_lengths[0]
+    st.write(f"Выберите частую последовательность {sequence_type} для длины {phrase_length}:")
 
-@st.dialog("Управление блоком")
-def manage_block_dialog(block_id):
-    block_to_manage = next((b for b in st.session_state.filter_blocks if b['id'] == block_id), None)
-    if not block_to_manage: return
-
-    st.subheader("Сохранить текущий блок")
-    name_to_save = st.text_input("Имя шаблона блока")
-    if st.button("Сохранить блок"):
-        if name_to_save:
-            clean_block = {k: v for k, v in block_to_manage.items() if k != 'id'}
-            if save_block(conn, name_to_save, clean_block):
-                st.toast("Шаблон блока сохранен!", icon="✅")
-                cached_load_block_names.clear()
-            else:
-                st.error("Ошибка сохранения блока.")
-        else:
-            st.warning("Введите имя для шаблона.")
+    sequences_data = cached_get_frequent_sequences(sequence_type, phrase_length)
     
-    st.markdown("---")
-    st.subheader("Загрузить шаблон в текущий блок")
-    saved_block_names = cached_load_block_names()
-    selected_block_name = st.selectbox("Выберите шаблон", ["-- Выберите --"] + saved_block_names)
+    options = []
+    for seq in sequences_data:
+        # Последний элемент в seq - это частотность
+        sequence_values = seq[:-1]
+        frequency = seq[-1]
+        options.append(f"{'_'.join(sequence_values)} (Частотность: {frequency})")
+
+    selected_option = st.selectbox("Последовательность", options)
+
+    if st.button("Заполнить"):
+        if selected_option:
+            # Извлекаем значения последовательности из выбранной опции
+            selected_values_str = selected_option.split(' (Частотность:')[0]
+            selected_values = selected_values_str.split('_')
+
+            if len(selected_values) != phrase_length:
+                st.error("Выбранная последовательность не соответствует выбранной длине фразы.")
+                return
+
+            # Очищаем текущие блоки фильтров
+            st.session_state.filter_blocks = []
+
+            # Создаем новые блоки на основе выбранной последовательности
+            for i, val in enumerate(selected_values):
+                new_block_id = str(uuid.uuid4())
+                new_rule_id = str(uuid.uuid4())
+                st.session_state.filter_blocks.append({
+                    'id': new_block_id,
+                    'position': i,
+                    'rules': [{
+                        'id': new_rule_id,
+                        'type': sequence_type,
+                        'values': [val]
+                    }]
+                })
+            st.toast("Блоки фильтров заполнены!", icon="✅")
+            st.rerun()
     
-    load_b_col, del_b_col = st.columns(2)
-    if load_b_col.button("Загрузить шаблон"):
-        if selected_block_name != "-- Выберите --":
-            loaded_block = load_block_by_name(conn, selected_block_name)
-            if loaded_block:
-                replace_block(block_id, loaded_block)
-                st.rerun()
-            else:
-                st.error("Ошибка загрузки блока.")
-
-    if del_b_col.button("Удалить шаблон"):
-            if selected_block_name != "-- Выберите --":
-                if delete_block_by_name(conn, selected_block_name):
-                    cached_load_block_names.clear()
-                    st.rerun()
-                else:
-                    st.error("Ошибка удаления шаблона.")
-
     if st.button("Закрыть"):
         st.rerun()
 
@@ -240,6 +215,15 @@ with main_col1:
         key="selected_lengths_widget",
         on_change=handle_length_change
     )
+
+    # Кнопки для заполнения по шаблону
+    fill_cols = st.columns(3)
+    if fill_cols[0].button("Заполнить DEP", use_container_width=True):
+        fill_sequence_dialog("dep")
+    if fill_cols[1].button("Заполнить POS", use_container_width=True):
+        fill_sequence_dialog("pos")
+    if fill_cols[2].button("Заполнить TAG", use_container_width=True):
+        fill_sequence_dialog("tag")
 
     st.markdown("---")
 
@@ -342,7 +326,9 @@ with main_col2:
         st.subheader("Результаты")
 
     if st.session_state.results:
-        df_results = pd.DataFrame(st.session_state.results, columns=["Фраза", "Частотность (млн)"])
+        # Меняем порядок данных для соответствия новому порядку столбцов
+        swapped_results = [(res[1], res[0]) for res in st.session_state.results]
+        df_results = pd.DataFrame(swapped_results, columns=["Частотность (млн)", "Фраза"])
         
         st.dataframe(
             df_results,
@@ -382,7 +368,7 @@ if st.session_state.show_word_analysis and st.session_state.results:
     max_position = max(word_analysis_data.keys()) if word_analysis_data else -1
     
     if max_position > -1:
-        tables_per_row = 4
+        tables_per_row = 7  # Увеличиваем количество таблиц в ряду до 7
         positions = sorted(word_analysis_data.keys())
 
         for i in range(0, len(positions), tables_per_row):
@@ -394,14 +380,14 @@ if st.session_state.show_word_analysis and st.session_state.results:
                     st.markdown(f"**Позиция {position + 1}**")
                     if position in word_analysis_data:
                         sorted_words = sorted(word_analysis_data[position].items(), key=lambda item: item[1], reverse=True)
-                        # Меняем заголовок на "Количество"
-                        df_pos = pd.DataFrame(sorted_words, columns=["Слово", "Количество"])
+                        # Меняем порядок столбцов: сначала Количество, потом Слово
+                        df_pos = pd.DataFrame([(count, word) for word, count in sorted_words], columns=["Количество", "Слово"])
                         
                         st.dataframe(
                             df_pos,
                             column_config={
-                                # Отображаем как целое число
-                                "Количество": st.column_config.NumberColumn(format="%d")
+                                "Количество": st.column_config.NumberColumn(format="%d", width="small"),
+                                "Слово": st.column_config.TextColumn(width="small")
                             },
                             use_container_width=True,
                             height=300,

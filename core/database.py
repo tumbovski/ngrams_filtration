@@ -64,6 +64,46 @@ def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_
         print(f"Ошибка при получении уникальных значений: {e}")
         return []
 
+def get_frequent_sequences(conn, sequence_type, phrase_length, limit=100):
+    if not conn: return []
+    db_column_name = COLUMN_MAPPING.get(sequence_type, sequence_type)
+    
+    if not (1 <= phrase_length <= 10): # Ограничение на длину фразы для безопасности и производительности
+        return []
+
+    select_parts = []
+    group_by_parts = []
+    for i in range(phrase_length):
+        select_parts.append(f"ngrams.{db_column_name}->>{i}")
+        group_by_parts.append(f"ngrams.{db_column_name}->>{i}")
+    
+    select_clause = ", ".join(select_parts)
+    group_by_clause = ", ".join(group_by_parts)
+
+    query = f"""
+        SELECT
+            {select_clause},
+            SUM(freq_mln) as total_frequency
+        FROM
+            ngrams
+        WHERE
+            len = {phrase_length} AND jsonb_array_length(ngrams.{db_column_name}) = {phrase_length}
+        GROUP BY
+            {group_by_clause}
+        ORDER BY
+            total_frequency DESC
+        LIMIT {limit};
+    """
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            # Возвращаем список кортежей: (val1, val2, ..., valN, total_frequency)
+            return cur.fetchall()
+    except Exception as e:
+        print(f"Ошибка при получении частых последовательностей {sequence_type} для длины {phrase_length}: {e}")
+        return []
+
 # --- Функции для сохранения/загрузки НАБОРОВ ---
 def save_filter_set(conn, name, data):
     if not conn: return False

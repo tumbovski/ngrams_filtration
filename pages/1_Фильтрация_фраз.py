@@ -70,7 +70,53 @@ def cached_load_block_names():
 def cached_get_frequent_sequences(sequence_type, phrase_length):
     return get_frequent_sequences(conn, sequence_type, phrase_length)
 
+# --- Основной интерфейс ---
+
 # --- Диалоговые окна ---
+@st.dialog("Управление блоком")
+def manage_block_dialog(block_id):
+    block_to_manage = next((b for b in st.session_state.filter_blocks if b['id'] == block_id), None)
+    if not block_to_manage: return
+
+    st.subheader("Сохранить текущий блок")
+    name_to_save = st.text_input("Имя шаблона блока")
+    if st.button("Сохранить блок"):
+        if name_to_save:
+            clean_block = {k: v for k, v in block_to_manage.items() if k != 'id'}
+            if save_block(conn, name_to_save, clean_block):
+                st.toast("Шаблон блока сохранен!", icon="✅")
+                cached_load_block_names.clear()
+            else:
+                st.error("Ошибка сохранения блока.")
+        else:
+            st.warning("Введите имя для шаблона.")
+    
+    st.markdown("---")
+    st.subheader("Загрузить шаблон в текущий блок")
+    saved_block_names = cached_load_block_names()
+    selected_block_name = st.selectbox("Выберите шаблон", ["-- Выберите --"] + saved_block_names)
+    
+    load_b_col, del_b_col = st.columns(2)
+    if load_b_col.button("Загрузить шаблон"):
+        if selected_block_name != "-- Выберите --":
+            loaded_block = load_block_by_name(conn, selected_block_name)
+            if loaded_block:
+                replace_block(block_id, loaded_block)
+                st.rerun()
+            else:
+                st.error("Ошибка загрузки блока.")
+
+    if del_b_col.button("Удалить шаблон"):
+            if selected_block_name != "-- Выберите --":
+                if delete_block_by_name(conn, selected_block_name):
+                    cached_load_block_names.clear()
+                    st.rerun()
+                else:
+                    st.error("Ошибка удаления шаблона.")
+
+    if st.button("Закрыть"):
+        st.rerun()
+
 @st.dialog("Заполнить по шаблону")
 def fill_sequence_dialog(sequence_type):
     if not st.session_state.selected_lengths:
@@ -95,7 +141,7 @@ def fill_sequence_dialog(sequence_type):
         # Последний элемент в seq - это частотность
         sequence_values = seq[:-1]
         frequency = seq[-1]
-        options.append(f"{'_'.join(sequence_values)} (Частотность: {frequency})")
+        options.append(f"{'_'.join(sequence_values)} (Частотность: {frequency:.3f})")
 
     selected_option = st.selectbox("Последовательность", options)
 
@@ -131,7 +177,53 @@ def fill_sequence_dialog(sequence_type):
     if st.button("Закрыть"):
         st.rerun()
 
-# --- Основной интерфейс ---
+@st.dialog("Сгенерированный SQL-запрос")
+def show_sql_dialog():
+    st.code(st.session_state.last_query, language='sql')
+    if st.button("Закрыть"):
+        st.rerun()
+
+@st.dialog("Сохранить набор фильтров")
+def save_set_dialog():
+    name_to_save = st.text_input("Имя набора")
+    if st.button("Сохранить"):
+        if name_to_save:
+            if save_filter_set(conn, name_to_save, {"lengths": st.session_state.selected_lengths, "blocks": st.session_state.filter_blocks}):
+                st.toast("Набор сохранен!", icon="✅")
+                cached_load_filter_set_names.clear()
+                st.rerun()
+            else:
+                st.error("Ошибка сохранения набора.")
+        else:
+            st.warning("Введите имя.")
+    if st.button("Отмена"):
+        st.rerun()
+
+@st.dialog("Загрузить набор фильтров")
+def load_set_dialog():
+    saved_names = cached_load_filter_set_names()
+    selected_name = st.selectbox("Выберите набор", ["-- Выберите --"] + saved_names)
+    load_btn_col, del_btn_col = st.columns(2)
+    if load_btn_col.button("Загрузить"):
+        if selected_name != "-- Выберите --":
+            loaded = load_filter_set_by_name(conn, selected_name)
+            if loaded:
+                st.session_state.selected_lengths = loaded.get("lengths", [])
+                st.session_state.filter_blocks = loaded.get("blocks", [])
+                st.rerun()
+            else:
+                st.error("Ошибка загрузки набора.")
+    if del_btn_col.button("Удалить"):
+        if selected_name != "-- Выберите --":
+            if delete_filter_set_by_name(conn, selected_name):
+                cached_load_filter_set_names.clear()
+                st.rerun()
+            else:
+                st.error("Ошибка удаления набора.")
+    if st.button("Отмена"):
+        st.rerun()
+
+# --- Подключение к БД и кэширование ---
 st.title("Фильтрация фраз")
 main_col1, main_col2 = st.columns([2, 1.5])
 
@@ -235,8 +327,12 @@ with main_col1:
             block_id = block['id']
             
             header_cols = st.columns([2, 1.3], vertical_alignment="bottom")
-            current_pos_index = pos_options.index(block['position'] + 1) if (block['position'] + 1) in pos_options else 0
-            header_cols[0].selectbox("Позиция", pos_options, index=current_pos_index, key=f"pos_block_{block_id}", on_change=handle_position_change, args=(block_id,))
+            
+            if pos_options: # Only render selectbox if options are available
+                current_pos_index = pos_options.index(block['position'] + 1) if (block['position'] + 1) in pos_options else 0
+                header_cols[0].selectbox("Позиция", pos_options, index=current_pos_index, key=f"pos_block_{block_id}", on_change=handle_position_change, args=(block_id,))
+            else:
+                header_cols[0].warning("Выберите длину фразы для выбора позиции.")
             
             with header_cols[1]:
                 btn_cols = st.columns(2, gap="small")

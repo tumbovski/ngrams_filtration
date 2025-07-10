@@ -368,26 +368,25 @@ if st.session_state.show_word_analysis and st.session_state.results:
     @st.cache_data
     def analyze_words_by_position(_results_tuple):
         results = list(_results_tuple)
-        position_word_freq = {}
-        for phrase_text, phrase_freq in results:
+        position_word_count = {}
+        # Считаем количество вхождений каждого слова на каждой позиции локально
+        for phrase_text, _ in results:  # Игнорируем глобальную частотность
             words = phrase_text.split()
             for i, word in enumerate(words):
-                if i not in position_word_freq:
-                    position_word_freq[i] = {}
-                position_word_freq[i][word] = position_word_freq[i].get(word, 0) + float(phrase_freq)
-        return position_word_freq
+                if i not in position_word_count:
+                    position_word_count[i] = {}
+                position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
+        return position_word_count
 
     word_analysis_data = analyze_words_by_position(tuple(map(tuple, st.session_state.results)))
     max_position = max(word_analysis_data.keys()) if word_analysis_data else -1
     
     if max_position > -1:
-        tables_per_row = 4  # Определяем, сколько таблиц будет в одном ряду
+        tables_per_row = 4
         positions = sorted(word_analysis_data.keys())
 
         for i in range(0, len(positions), tables_per_row):
-            # Создаем ряд колонок для очередной группы таблиц
             cols = st.columns(tables_per_row)
-            # Берем срез позиций для текущего ряда
             row_positions = positions[i:i + tables_per_row]
 
             for j, position in enumerate(row_positions):
@@ -395,12 +394,14 @@ if st.session_state.show_word_analysis and st.session_state.results:
                     st.markdown(f"**Позиция {position + 1}**")
                     if position in word_analysis_data:
                         sorted_words = sorted(word_analysis_data[position].items(), key=lambda item: item[1], reverse=True)
-                        df_pos = pd.DataFrame(sorted_words, columns=["Слово", "Частотность"])
+                        # Меняем заголовок на "Количество"
+                        df_pos = pd.DataFrame(sorted_words, columns=["Слово", "Количество"])
                         
                         st.dataframe(
                             df_pos,
                             column_config={
-                                "Частотность": st.column_config.NumberColumn(format="%.3f")
+                                # Отображаем как целое число
+                                "Количество": st.column_config.NumberColumn(format="%d")
                             },
                             use_container_width=True,
                             height=300,

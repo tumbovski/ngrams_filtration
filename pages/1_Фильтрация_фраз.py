@@ -183,22 +183,46 @@ def fill_sequence_dialog(sequence_type):
                 st.error("Выбранная последовательность не соответствует выбранной длине фразы.")
                 return
 
-            # Очищаем текущие блоки фильтров
-            st.session_state.filter_blocks = []
+            # Вместо очистки, будем добавлять или обновлять блоки
+            # Создаем временный словарь для быстрого доступа к блокам по позиции
+            existing_blocks_by_position = {block['position']: block for block in st.session_state.filter_blocks}
 
-            # Создаем новые блоки на основе выбранной последовательности
             for i, val in enumerate(selected_values):
-                new_block_id = str(uuid.uuid4())
-                new_rule_id = str(uuid.uuid4())
-                st.session_state.filter_blocks.append({
-                    'id': new_block_id,
-                    'position': i,
-                    'rules': [{
-                        'id': new_rule_id,
-                        'type': sequence_type,
-                        'values': [val]
-                    }]
-                })
+                position = i
+                if position in existing_blocks_by_position:
+                    # Блок на этой позиции уже существует, обновляем его
+                    block = existing_blocks_by_position[position]
+                    found_rule = False
+                    for rule in block['rules']:
+                        if rule['type'] == sequence_type:
+                            if val not in rule['values']:
+                                rule['values'].append(val)
+                            found_rule = True
+                            break
+                    if not found_rule:
+                        # Нет правила такого типа в существующем блоке, добавляем новое
+                        new_rule_id = str(uuid.uuid4())
+                        block['rules'].append({
+                            'id': new_rule_id,
+                            'type': sequence_type,
+                            'values': [val]
+                        })
+                else:
+                    # Блока на этой позиции нет, создаем новый
+                    new_block_id = str(uuid.uuid4())
+                    new_rule_id = str(uuid.uuid4())
+                    st.session_state.filter_blocks.append({
+                        'id': new_block_id,
+                        'position': position,
+                        'rules': [{
+                            'id': new_rule_id,
+                            'type': sequence_type,
+                            'values': [val]
+                        }]
+                    })
+            
+            # Сортируем блоки по позиции, чтобы UI отображался корректно
+            st.session_state.filter_blocks.sort(key=lambda b: b['position'])
             st.toast("Блоки фильтров заполнены!", icon="✅")
             st.rerun()
     

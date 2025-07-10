@@ -365,8 +365,6 @@ with main_col2:
 if st.session_state.show_word_analysis and st.session_state.results:
     st.subheader("Анализ слов по позициям")
 
-    top_n = st.slider("Количество слов для отображения (топ-N):", min_value=3, max_value=20, value=10)
-
     @st.cache_data
     def analyze_words_by_position(_results_tuple):
         results = list(_results_tuple)
@@ -383,23 +381,30 @@ if st.session_state.show_word_analysis and st.session_state.results:
     max_position = max(word_analysis_data.keys()) if word_analysis_data else -1
     
     if max_position > -1:
-        charts_per_row = 4 # Определяем, сколько графиков будет в одном ряду
+        tables_per_row = 4  # Определяем, сколько таблиц будет в одном ряду
         positions = sorted(word_analysis_data.keys())
 
-        for i in range(0, len(positions), charts_per_row):
-            # Создаем ряд колонок для очередной группы графиков
-            cols = st.columns(charts_per_row)
+        for i in range(0, len(positions), tables_per_row):
+            # Создаем ряд колонок для очередной группы таблиц
+            cols = st.columns(tables_per_row)
             # Берем срез позиций для текущего ряда
-            row_positions = positions[i:i + charts_per_row]
+            row_positions = positions[i:i + tables_per_row]
 
             for j, position in enumerate(row_positions):
                 with cols[j]:
                     st.markdown(f"**Позиция {position + 1}**")
-                    sorted_words = sorted(word_analysis_data[position].items(), key=lambda item: item[1], reverse=True)
-                    top_words = sorted_words[:top_n]
-                    
-                    if top_words:
-                        df_chart = pd.DataFrame(top_words, columns=["Слово", "Частотность"]).set_index("Слово")
-                        st.bar_chart(df_chart, height=350) # Немного уменьшим высоту для компактности
+                    if position in word_analysis_data:
+                        sorted_words = sorted(word_analysis_data[position].items(), key=lambda item: item[1], reverse=True)
+                        df_pos = pd.DataFrame(sorted_words, columns=["Слово", "Частотность"])
+                        
+                        st.dataframe(
+                            df_pos,
+                            column_config={
+                                "Частотность": st.column_config.NumberColumn(format="%.3f")
+                            },
+                            use_container_width=True,
+                            height=300,
+                            hide_index=True
+                        )
                     else:
-                        st.info("Нет данных для отображения.")
+                        st.info("Нет данных")

@@ -81,6 +81,19 @@ def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tu
 
     return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
 
+@st.cache_data(ttl=3600)
+def analyze_words_by_position(_results_tuple):
+    results = list(_results_tuple)
+    position_word_count = {}
+    # Считаем количество вхождений каждого слова на каждой позиции локально
+    for phrase_text, _ in results:  # Игнорируем глобальную частотность
+        words = phrase_text.split()
+        for i, word in enumerate(words):
+            if i not in position_word_count:
+                position_word_count[i] = {}
+            position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
+    return position_word_count
+
 # --- Основной интерфейс ---
 
 # --- Диалоговые окна ---
@@ -467,6 +480,36 @@ if apply_button:
             st.session_state.results = []
             st.error("Ошибка выполнения запроса к базе данных.")
 
+
+if st.session_state.show_word_analysis and st.session_state.results:
+    st.markdown("### Анализ слов по позициям", unsafe_allow_html=True)
+    position_word_counts = analyze_words_by_position(tuple(st.session_state.results))
+
+    # Определяем количество колонок для таблиц (7 таблиц в строке)
+    num_columns = 7
+    columns = st.columns(num_columns)
+
+    # Сортируем позиции для последовательного отображения
+    sorted_positions = sorted(position_word_counts.keys())
+
+    for i, position in enumerate(sorted_positions):
+        with columns[i % num_columns]:
+            st.markdown(f"**Позиция {position + 1}**")
+            word_counts = position_word_counts[position]
+            # Сортируем слова по частоте убывания
+            sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
+            df_position = pd.DataFrame(sorted_words, columns=["Слово", "Количество"])
+            st.dataframe(
+                df_position,
+                column_config={
+                    "Слово": st.column_config.TextColumn(width="small"),
+                    "Количество": st.column_config.NumberColumn(width="small")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+
+
 with main_col2:
     if st.session_state.results:
         st.markdown(f"### Результаты <small>({len(st.session_state.results)})</small>", unsafe_allow_html=True)
@@ -496,50 +539,5 @@ with main_col2:
         if st.button("Анализ слов по позициям"):
             st.session_state.show_word_analysis = True
 
-if st.session_state.show_word_analysis and st.session_state.results:
-    st.subheader("Анализ слов по позициям")
 
-    @st.cache_data
-    def analyze_words_by_position(_results_tuple):
-        results = list(_results_tuple)
-        position_word_count = {}
-        # Считаем количество вхождений каждого слова на каждой позиции локально
-        for phrase_text, _ in results:  # Игнорируем глобальную частотность
-            words = phrase_text.split()
-            for i, word in enumerate(words):
-                if i not in position_word_count:
-                    position_word_count[i] = {}
-                position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
-        return position_word_count
 
-    word_analysis_data = analyze_words_by_position(tuple(map(tuple, st.session_state.results)))
-    max_position = max(word_analysis_data.keys()) if word_analysis_data else -1
-    
-    if max_position > -1:
-        tables_per_row = 7  # Увеличиваем количество таблиц в ряду до 7
-        positions = sorted(word_analysis_data.keys())
-
-        for i in range(0, len(positions), tables_per_row):
-            cols = st.columns(tables_per_row)
-            row_positions = positions[i:i + tables_per_row]
-
-            for j, position in enumerate(row_positions):
-                with cols[j]:
-                    st.markdown(f"**Позиция {position + 1}**")
-                    if position in word_analysis_data:
-                        sorted_words = sorted(word_analysis_data[position].items(), key=lambda item: item[1], reverse=True)
-                        # Меняем порядок столбцов: сначала Количество, потом Слово
-                        df_pos = pd.DataFrame([(count, word) for word, count in sorted_words], columns=["Количество", "Слово"])
-                        
-                        st.dataframe(
-                            df_pos,
-                            column_config={
-                                "Количество": st.column_config.NumberColumn(format="%d", width="small"),
-                                "Слово": st.column_config.TextColumn(width="small")
-                            },
-                            use_container_width=True,
-                            height=300,
-                            hide_index=True
-                        )
-                    else:
-                        st.info("Нет данных")

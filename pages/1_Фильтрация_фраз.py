@@ -67,8 +67,19 @@ def cached_load_block_names():
     return load_block_names(conn)
 
 @st.cache_data(ttl=3600)
-def cached_get_frequent_sequences(sequence_type, phrase_length):
-    return get_frequent_sequences(conn, sequence_type, phrase_length)
+def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple):
+    # Рекурсивно преобразуем хешируемую структуру обратно в стандартные dict и list
+    def make_mutable(obj):
+        if isinstance(obj, frozenset):
+            return dict((k, make_mutable(v)) for k, v in obj)
+        if isinstance(obj, tuple):
+            return list(make_mutable(v) for v in obj)
+        return obj
+
+    mutable_filter_blocks = make_mutable(filter_blocks_tuple)
+    mutable_selected_lengths = list(selected_lengths_tuple)
+
+    return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
 
 # --- Основной интерфейс ---
 
@@ -134,7 +145,24 @@ def fill_sequence_dialog(sequence_type):
     phrase_length = st.session_state.selected_lengths[0]
     st.write(f"Выберите частую последовательность {sequence_type} для длины {phrase_length}:")
 
-    sequences_data = cached_get_frequent_sequences(sequence_type, phrase_length)
+    blocks_tuple = tuple(
+        frozenset({
+            "id": b["id"],
+            "position": b["position"],
+            "rules": tuple(
+                frozenset({
+                    "id": r["id"],
+                    "type": r["type"],
+                    "values": tuple(r["values"])
+                }.items())
+                for r in b["rules"]
+            )
+        }.items())
+        for b in st.session_state.filter_blocks
+    )
+    selected_lengths_tuple = tuple(st.session_state.selected_lengths)
+
+    sequences_data = cached_get_frequent_sequences(sequence_type, phrase_length, blocks_tuple, selected_lengths_tuple)
     
     options = []
     for seq in sequences_data:

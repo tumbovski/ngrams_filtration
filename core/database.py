@@ -64,7 +64,7 @@ def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_
         print(f"Ошибка при получении уникальных значений: {e}")
         return []
 
-def get_frequent_sequences(conn, sequence_type, phrase_length, limit=100):
+def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, selected_lengths, limit=100):
     if not conn: return []
     db_column_name = COLUMN_MAPPING.get(sequence_type, sequence_type)
     
@@ -80,6 +80,16 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, limit=100):
     select_clause = ", ".join(select_parts)
     group_by_clause = ", ".join(group_by_parts)
 
+    where_clauses = build_where_clauses(filter_blocks)
+    if selected_lengths:
+        where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
+
+    # Добавляем условие на длину фразы для текущего запроса
+    where_clauses.append(f"len = {phrase_length}")
+    where_clauses.append(f"jsonb_array_length(ngrams.{db_column_name}) = {phrase_length}")
+
+    full_where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
+
     query = f"""
         SELECT
             {select_clause},
@@ -87,7 +97,7 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, limit=100):
         FROM
             ngrams
         WHERE
-            len = {phrase_length} AND jsonb_array_length(ngrams.{db_column_name}) = {phrase_length}
+            {full_where_clause}
         GROUP BY
             {group_by_clause}
         ORDER BY

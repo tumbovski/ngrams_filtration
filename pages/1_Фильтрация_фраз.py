@@ -431,6 +431,18 @@ with main_col1:
             st.button("➕ Добавить правило", on_click=add_rule, args=(block_id,), key=f"add_rule_{block_id}")
 
     st.button("Добавить блок фильтров", on_click=add_block, use_container_width=True)
+
+    sql_col, save_set_col, load_set_col = st.columns(3)
+
+    if sql_col.button("SQL", use_container_width=True):
+        if st.session_state.last_query:
+            show_sql_dialog()
+
+    if save_set_col.button("Сохранить набор", use_container_width=True):
+        save_set_dialog()
+
+    if load_set_col.button("Загрузить набор", use_container_width=True):
+        load_set_dialog()
     st.markdown("---")
 
     # --- Панель подсказок ---
@@ -472,19 +484,7 @@ with main_col1:
                         else:
                             st.caption("Нет вариантов")
     
-    st.markdown("---")
-
-    sql_col, save_set_col, load_set_col = st.columns(3)
-
-    if sql_col.button("SQL", use_container_width=True):
-        if st.session_state.last_query:
-            show_sql_dialog()
-
-    if save_set_col.button("Сохранить набор", use_container_width=True):
-        save_set_dialog()
-
-    if load_set_col.button("Загрузить набор", use_container_width=True):
-        load_set_dialog()
+    
 
 def _run_query():
     

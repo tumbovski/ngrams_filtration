@@ -1,1 +1,1 @@
-Feature: Enhance 'fill by template' to merge with existing filters
+Fix: Word analysis display and add total word count per position

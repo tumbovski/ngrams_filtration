@@ -114,6 +114,103 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
         print(f"Ошибка при получении частых последовательностей {sequence_type} для длины {phrase_length}: {e}")
         return []
 
+def get_suggestion_data(conn, selected_lengths, filter_blocks):
+    """
+    Получает данные для панели подсказок: доступные варианты фильтрации
+    для каждой позиции, отсортированные по частотности.
+    """
+    if not conn or not selected_lengths:
+        return {}
+
+    max_len = max(selected_lengths) if selected_lengths else 0
+    if max_len == 0:
+        return {}
+
+    base_where_clauses = build_where_clauses(filter_blocks)
+    if selected_lengths:
+        base_where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
+    
+    base_where_str = " AND " + " AND ".join(base_where_clauses) if base_where_clauses else ""
+
+    suggestion_types = ['dep', 'pos', 'tag', 'morph']
+    
+    union_parts = []
+    for i in range(max_len):
+        for rule_type in suggestion_types:
+            is_filtered = any(
+                rule['type'] == rule_type and rule['values'] 
+                for block in filter_blocks if block['position'] == i 
+                for rule in block['rules']
+            )
+            
+            if not is_filtered:
+                db_column = COLUMN_MAPPING[rule_type]
+                if rule_type == 'morph':
+                    # Запрос для структуры "массив массивов строк" (для morph)
+                    union_parts.append(f"""
+                        SELECT 
+                            {i} as position, 
+                            '{rule_type}' as type, 
+                            jsonb_array_elements_text(ngrams.{db_column}->{i}) as value, 
+                            SUM(freq_mln) as frequency
+                        FROM ngrams
+                        WHERE 
+                            jsonb_array_length(ngrams.{db_column}) > {i} AND
+                            jsonb_typeof(ngrams.{db_column}->{i}) = 'array'
+                            {base_where_str}
+                        GROUP BY 1, 2, 3
+                    """)
+                else:
+                    # Запрос для структуры "массив строк" (для dep, pos, tag)
+                    union_parts.append(f"""
+                        SELECT 
+                            {i} as position, 
+                            '{rule_type}' as type, 
+                            ngrams.{db_column}->>{i} as value, 
+                            SUM(freq_mln) as frequency
+                        FROM ngrams
+                        WHERE 
+                            jsonb_array_length(ngrams.{db_column}) > {i}
+                            {base_where_str}
+                        GROUP BY 1, 2, 3
+                    """)
+
+    if not union_parts:
+        return {} 
+
+    full_query = " UNION ALL ".join(union_parts)
+    full_query += " ORDER BY position, frequency DESC"
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(full_query)
+            results = cur.fetchall()
+            
+            suggestion_data = {}
+            for pos, r_type, r_val, r_freq in results:
+                if r_val is None or r_val == '': continue
+                
+                if pos not in suggestion_data:
+                    suggestion_data[pos] = []
+                
+                suggestion_data[pos].append({
+                    "type": r_type,
+                    "value": r_val,
+                    "freq": r_freq
+                })
+
+            for pos in suggestion_data:
+                unique_items = {item['value']: item for item in suggestion_data[pos]}.values()
+                suggestion_data[pos] = sorted(list(unique_items), key=lambda x: x['freq'], reverse=True)
+
+            return suggestion_data
+    except Exception as e:
+        print(f"Ошибка при получении данных для подсказок: {e}")
+        conn.rollback()
+        return {}
+
+
+
 # --- Функции для сохранения/загрузки НАБОРОВ ---
 def save_filter_set(conn, name, data):
     if not conn: return False

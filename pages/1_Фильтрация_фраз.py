@@ -16,7 +16,8 @@ from core.database import (
     delete_block_by_name,
     build_where_clauses,
     execute_query,
-    get_frequent_sequences # Добавляем импорт новой функции
+    get_frequent_sequences,
+    get_suggestion_data
 )
 
 # --- Управление состоянием ---
@@ -39,21 +40,28 @@ if not conn:
     st.error("Не удалось подключиться к базе данных. Проверьте настройки в .env файле и доступность сервера.")
     st.stop()
 
-# Оборачиваем функции работы с БД в кэшируемые streamlit-функции
+# --- Хелперы для кэширования (ИСПРАВЛЕННЫЕ) ---
+def make_hashable(obj):
+    if isinstance(obj, dict):
+        return frozenset((k, make_hashable(v)) for k, v in sorted(obj.items()))
+    if isinstance(obj, list):
+        return tuple(make_hashable(v) for v in obj)
+    return obj
+
+def make_mutable(obj):
+    if isinstance(obj, frozenset):
+        return {k: make_mutable(v) for k, v in obj}
+    if isinstance(obj, tuple):
+        return list(make_mutable(v) for v in obj)
+    return obj
+
+# --- Кэшируемые функции ---
 @st.cache_data(ttl=3600)
 def cached_get_all_unique_lengths():
     return get_all_unique_lengths(conn)
 
 @st.cache_data(ttl=3600)
 def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude):
-    # Рекурсивно преобразуем хешируемую структуру обратно в стандартные dict и list
-    def make_mutable(obj):
-        if isinstance(obj, frozenset):
-            return dict((k, make_mutable(v)) for k, v in obj)
-        if isinstance(obj, tuple):
-            return list(make_mutable(v) for v in obj)
-        return obj
-
     all_blocks = make_mutable(blocks_tuple)
     selected_lengths = list(selected_lengths_tuple)
     return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude)
@@ -68,20 +76,134 @@ def cached_load_block_names():
 
 @st.cache_data(ttl=3600)
 def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple):
-    # Рекурсивно преобразуем хешируемую структуру обратно в стандартные dict и list
-    def make_mutable(obj):
-        if isinstance(obj, frozenset):
-            return dict((k, make_mutable(v)) for k, v in obj)
-        if isinstance(obj, tuple):
-            return list(make_mutable(v) for v in obj)
-        return obj
-
     mutable_filter_blocks = make_mutable(filter_blocks_tuple)
     mutable_selected_lengths = list(selected_lengths_tuple)
-
     return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
 
-# --- Основной интерфейс ---
+@st.cache_data(ttl=3600)
+def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple):
+    selected_lengths = list(selected_lengths_tuple)
+    filter_blocks = make_mutable(filter_blocks_tuple)
+    return get_suggestion_data(conn, selected_lengths, filter_blocks)
+
+@st.cache_data(ttl=3600)
+def analyze_words_by_position(_results_tuple):
+    results = list(_results_tuple)
+    position_word_count = {}
+    for phrase_text, _ in results:
+        words = phrase_text.split()
+        for i, word in enumerate(words):
+            if i not in position_word_count:
+                position_word_count[i] = {}
+            position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
+    return position_word_count
+
+# --- Функции-коллбэки и хендлеры ---
+def clear_caches():
+    cached_get_unique_values_for_rule.clear()
+    cached_get_suggestion_data.clear()
+    cached_get_frequent_sequences.clear()
+
+def handle_length_change():
+    st.session_state.selected_lengths = st.session_state.selected_lengths_widget
+    max_len = max(st.session_state.selected_lengths) if st.session_state.selected_lengths else 0
+    st.session_state.filter_blocks = [b for b in st.session_state.filter_blocks if b['position'] < max_len]
+    clear_caches()
+
+def add_block():
+    new_block_id = str(uuid.uuid4())
+    new_rule_id = str(uuid.uuid4())
+    st.session_state.filter_blocks.append({'id': new_block_id, 'position': 0, 'rules': [{'id': new_rule_id, 'type': 'dep', 'values': []}]})
+    clear_caches()
+
+def remove_block(block_id):
+    st.session_state.filter_blocks = [b for b in st.session_state.filter_blocks if b['id'] != block_id]
+    clear_caches()
+
+def add_rule(block_id):
+    for block in st.session_state.filter_blocks:
+        if block['id'] == block_id:
+            block['rules'].append({'id': str(uuid.uuid4()), 'type': 'dep', 'values': []})
+            break
+    clear_caches()
+
+def remove_rule(block_id, rule_id):
+    for block in st.session_state.filter_blocks:
+        if block['id'] == block_id:
+            block['rules'] = [r for r in block['rules'] if r['id'] != rule_id]
+            break
+    clear_caches()
+
+def handle_position_change(block_id):
+    new_pos = st.session_state[f"pos_block_{block_id}"] - 1
+    for block in st.session_state.filter_blocks:
+        if block['id'] == block_id and block['position'] != new_pos:
+            block['position'] = new_pos
+            for rule in block['rules']:
+                rule['values'] = []
+            clear_caches()
+            break
+
+def handle_type_change(block_id, rule_id):
+    new_type = st.session_state[f"type_{rule_id}"]
+    for block in st.session_state.filter_blocks:
+        if block['id'] == block_id:
+            for rule in block['rules']:
+                if rule['id'] == rule_id and rule['type'] != new_type:
+                    rule['type'] = new_type
+                    rule['values'] = []
+                    clear_caches()
+                    break
+            break
+
+def handle_values_change(block_id, rule_id, disp_opts):
+    selected_disp = st.session_state[f"vals_{rule_id}"]
+    new_values = [disp_opts[s] for s in selected_disp]
+    for block in st.session_state.filter_blocks:
+        if block['id'] == block_id:
+            for rule in block['rules']:
+                if rule['id'] == rule_id:
+                    rule['values'] = new_values
+                    clear_caches()
+                    break
+            break
+
+def replace_block(block_id, new_block_data):
+    for i, block in enumerate(st.session_state.filter_blocks):
+        if block['id'] == block_id:
+            new_block_data['id'] = block_id
+            st.session_state.filter_blocks[i] = new_block_data
+            clear_caches()
+            break
+
+def toggle_filter_from_suggestion(position, rule_type, value):
+    block_exists = False
+    for block in st.session_state.filter_blocks:
+        if block['position'] == position:
+            block_exists = True
+            rule_exists = False
+            for rule in block['rules']:
+                if rule['type'] == rule_type:
+                    rule_exists = True
+                    if value in rule['values']:
+                        rule['values'].remove(value)
+                    else:
+                        rule['values'].append(value)
+                    break
+            if not rule_exists:
+                block['rules'].append({'id': str(uuid.uuid4()), 'type': rule_type, 'values': [value]})
+            break
+    
+    if not block_exists:
+        st.session_state.filter_blocks.append({
+            'id': str(uuid.uuid4()),
+            'position': position,
+            'rules': [{'id': str(uuid.uuid4()), 'type': rule_type, 'values': [value]}]
+        })
+    
+    st.session_state.filter_blocks = [b for b in ({'id': b['id'], 'position': b['position'], 'rules': [r for r in b['rules'] if r['values']]} for b in st.session_state.filter_blocks) if b['rules']]
+    st.session_state.filter_blocks.sort(key=lambda b: b['position'])
+    clear_caches()
 
 # --- Диалоговые окна ---
 @st.dialog("Управление блоком")
@@ -145,37 +267,21 @@ def fill_sequence_dialog(sequence_type):
     phrase_length = st.session_state.selected_lengths[0]
     st.write(f"Выберите частую последовательность {sequence_type} для длины {phrase_length}:")
 
-    blocks_tuple = tuple(
-        frozenset({
-            "id": b["id"],
-            "position": b["position"],
-            "rules": tuple(
-                frozenset({
-                    "id": r["id"],
-                    "type": r["type"],
-                    "values": tuple(r["values"])
-                }.items())
-                for r in b["rules"]
-            )
-        }.items())
-        for b in st.session_state.filter_blocks
-    )
+    blocks_tuple = make_hashable(st.session_state.filter_blocks)
     selected_lengths_tuple = tuple(st.session_state.selected_lengths)
 
     sequences_data = cached_get_frequent_sequences(sequence_type, phrase_length, blocks_tuple, selected_lengths_tuple)
     
     options = []
     for seq in sequences_data:
-        # Последний элемент в seq - это частотность
         sequence_values = seq[:-1]
         frequency = seq[-1]
-        options.append(f"{'_'.join(sequence_values)} (Частотность: {frequency:.3f})")
+        options.append(f"{'_'.join(map(str,sequence_values))} (Частотность: {frequency:.3f})")
 
     selected_option = st.selectbox("Последовательность", options)
 
     if st.button("Заполнить"):
         if selected_option:
-            # Извлекаем значения последовательности из выбранной опции
             selected_values_str = selected_option.split(' (Частотность:')[0]
             selected_values = selected_values_str.split('_')
 
@@ -183,14 +289,11 @@ def fill_sequence_dialog(sequence_type):
                 st.error("Выбранная последовательность не соответствует выбранной длине фразы.")
                 return
 
-            # Вместо очистки, будем добавлять или обновлять блоки
-            # Создаем временный словарь для быстрого доступа к блокам по позиции
             existing_blocks_by_position = {block['position']: block for block in st.session_state.filter_blocks}
 
             for i, val in enumerate(selected_values):
                 position = i
                 if position in existing_blocks_by_position:
-                    # Блок на этой позиции уже существует, обновляем его
                     block = existing_blocks_by_position[position]
                     found_rule = False
                     for rule in block['rules']:
@@ -200,29 +303,16 @@ def fill_sequence_dialog(sequence_type):
                             found_rule = True
                             break
                     if not found_rule:
-                        # Нет правила такого типа в существующем блоке, добавляем новое
-                        new_rule_id = str(uuid.uuid4())
-                        block['rules'].append({
-                            'id': new_rule_id,
-                            'type': sequence_type,
-                            'values': [val]
-                        })
+                        block['rules'].append({'id': str(uuid.uuid4()), 'type': sequence_type, 'values': [val]})
                 else:
-                    # Блока на этой позиции нет, создаем новый
-                    new_block_id = str(uuid.uuid4())
-                    new_rule_id = str(uuid.uuid4())
                     st.session_state.filter_blocks.append({
-                        'id': new_block_id,
+                        'id': str(uuid.uuid4()),
                         'position': position,
-                        'rules': [{
-                            'id': new_rule_id,
-                            'type': sequence_type,
-                            'values': [val]
-                        }]
+                        'rules': [{'id': str(uuid.uuid4()), 'type': sequence_type, 'values': [val]}]
                     })
             
-            # Сортируем блоки по позиции, чтобы UI отображался корректно
             st.session_state.filter_blocks.sort(key=lambda b: b['position'])
+            clear_caches()
             st.toast("Блоки фильтров заполнены!", icon="✅")
             st.rerun()
     
@@ -262,6 +352,7 @@ def load_set_dialog():
             if loaded:
                 st.session_state.selected_lengths = loaded.get("lengths", [])
                 st.session_state.filter_blocks = loaded.get("blocks", [])
+                clear_caches()
                 st.rerun()
             else:
                 st.error("Ошибка загрузки набора.")
@@ -275,83 +366,13 @@ def load_set_dialog():
     if st.button("Отмена"):
         st.rerun()
 
-# --- Подключение к БД и кэширование ---
+# --- Основной интерфейс ---
 st.title("Фильтрация фраз")
 main_col1, main_col2 = st.columns([2, 1.5])
 
 with main_col1:
     st.subheader("Параметры фильтрации")
     
-    def handle_length_change():
-        st.session_state.selected_lengths = st.session_state.selected_lengths_widget
-        max_len = max(st.session_state.selected_lengths) if st.session_state.selected_lengths else 0
-        st.session_state.filter_blocks = [b for b in st.session_state.filter_blocks if b['position'] < max_len]
-        cached_get_unique_values_for_rule.clear()
-
-    def handle_position_change(block_id):
-        new_pos = st.session_state[f"pos_block_{block_id}"] - 1
-        for block in st.session_state.filter_blocks:
-            if block['id'] == block_id:
-                if block['position'] != new_pos:
-                    block['position'] = new_pos
-                    for rule in block['rules']:
-                        rule['values'] = []
-                    cached_get_unique_values_for_rule.clear()
-                break
-
-    def handle_type_change(block_id, rule_id):
-        new_type = st.session_state[f"type_{rule_id}"]
-        for block in st.session_state.filter_blocks:
-            if block['id'] == block_id:
-                for rule in block['rules']:
-                    if rule['id'] == rule_id:
-                        if rule['type'] != new_type:
-                            rule['type'] = new_type
-                            rule['values'] = []
-                            cached_get_unique_values_for_rule.clear()
-                        break
-                break
-
-    def handle_values_change(block_id, rule_id, disp_opts):
-        selected_disp = st.session_state[f"vals_{rule_id}"]
-        new_values = [disp_opts[s] for s in selected_disp]
-        for block in st.session_state.filter_blocks:
-            if block['id'] == block_id:
-                for rule in block['rules']:
-                    if rule['id'] == rule_id:
-                        rule['values'] = new_values
-                        break
-                break
-
-    def add_block():
-        new_block_id = str(uuid.uuid4())
-        new_rule_id = str(uuid.uuid4())
-        st.session_state.filter_blocks.append({'id': new_block_id, 'position': 0, 'rules': [{'id': new_rule_id, 'type': 'dep', 'values': []}]})
-    
-    def remove_block(block_id):
-        st.session_state.filter_blocks = [b for b in st.session_state.filter_blocks if b['id'] != block_id]
-
-    def add_rule(block_id):
-        for block in st.session_state.filter_blocks:
-            if block['id'] == block_id:
-                new_rule_id = str(uuid.uuid4())
-                block['rules'].append({'id': new_rule_id, 'type': 'dep', 'values': []})
-                break
-    
-    def remove_rule(block_id, rule_id):
-        for block in st.session_state.filter_blocks:
-            if block['id'] == block_id:
-                block['rules'] = [r for r in block['rules'] if r['id'] != rule_id]
-                break
-
-    def replace_block(block_id, new_block_data):
-        for i, block in enumerate(st.session_state.filter_blocks):
-            if block['id'] == block_id:
-                new_block_data['id'] = block_id
-                st.session_state.filter_blocks[i] = new_block_data
-                cached_get_unique_values_for_rule.clear()
-                break
-
     st.multiselect(
         "Длина фразы (токенов)",
         options=cached_get_all_unique_lengths(),
@@ -360,14 +381,10 @@ with main_col1:
         on_change=handle_length_change
     )
 
-    # Кнопки для заполнения по шаблону
     fill_cols = st.columns(3)
-    if fill_cols[0].button("Заполнить DEP", use_container_width=True):
-        fill_sequence_dialog("dep")
-    if fill_cols[1].button("Заполнить POS", use_container_width=True):
-        fill_sequence_dialog("pos")
-    if fill_cols[2].button("Заполнить TAG", use_container_width=True):
-        fill_sequence_dialog("tag")
+    if fill_cols[0].button("Заполнить DEP", use_container_width=True): fill_sequence_dialog("dep")
+    if fill_cols[1].button("Заполнить POS", use_container_width=True): fill_sequence_dialog("pos")
+    if fill_cols[2].button("Заполнить TAG", use_container_width=True): fill_sequence_dialog("tag")
 
     st.markdown("---")
 
@@ -380,7 +397,7 @@ with main_col1:
             
             header_cols = st.columns([2, 1.3], vertical_alignment="bottom")
             
-            if pos_options: # Only render selectbox if options are available
+            if pos_options:
                 current_pos_index = pos_options.index(block['position'] + 1) if (block['position'] + 1) in pos_options else 0
                 header_cols[0].selectbox("Позиция", pos_options, index=current_pos_index, key=f"pos_block_{block_id}", on_change=handle_position_change, args=(block_id,))
             else:
@@ -401,21 +418,7 @@ with main_col1:
                 current_type_index = ['dep', 'pos', 'tag', 'token', 'lemma', 'morph'].index(rule['type'])
                 rule_cols[0].selectbox("Тип", ['dep', 'pos', 'tag', 'token', 'lemma', 'morph'], index=current_type_index, key=f"type_{rule_id}", on_change=handle_type_change, args=(block_id, rule_id), label_visibility="collapsed")
                 
-                blocks_tuple = tuple(
-                    frozenset({
-                        "id": b["id"],
-                        "position": b["position"],
-                        "rules": tuple(
-                            frozenset({
-                                "id": r["id"],
-                                "type": r["type"],
-                                "values": tuple(r["values"])
-                            }.items())
-                            for r in b["rules"]
-                        )
-                    }.items())
-                    for b in st.session_state.filter_blocks
-                )
+                blocks_tuple = make_hashable(st.session_state.filter_blocks)
                 selected_lengths_tuple = tuple(st.session_state.selected_lengths)
                 unique_vals = cached_get_unique_values_for_rule(block['position'], rule['type'], selected_lengths_tuple, blocks_tuple, block_id, rule_id)
                 
@@ -429,6 +432,47 @@ with main_col1:
             st.button("➕ Добавить правило", on_click=add_rule, args=(block_id,), key=f"add_rule_{block_id}")
 
     st.button("Добавить блок фильтров", on_click=add_block, use_container_width=True)
+    st.markdown("---")
+
+    # --- Панель подсказок ---
+    if st.session_state.selected_lengths:
+        with st.expander("Подсказки для фильтрации", expanded=True):
+            selected_lengths_tuple = tuple(st.session_state.selected_lengths)
+            filter_blocks_tuple = make_hashable(st.session_state.filter_blocks)
+            
+            suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple)
+
+            if not suggestion_data:
+                st.info("Нет доступных вариантов для дальнейшей фильтрации.")
+            else:
+                max_len_sugg = max(suggestion_data.keys()) + 1
+                cols = st.columns(max_len_sugg)
+                
+                active_filters = set()
+                for b in st.session_state.filter_blocks:
+                    for r in b['rules']:
+                        for v in r['values']:
+                            active_filters.add((b['position'], r['type'], v))
+
+                for i in range(max_len_sugg):
+                    with cols[i]:
+                        st.markdown(f"**Позиция {i+1}**")
+                        if i in suggestion_data:
+                            for s in suggestion_data[i][:25]:
+                                is_checked = (i, s['type'], s['value']) in active_filters
+                                key = f"suggest_{i}_{s['type']}_{s['value']}"
+                                label = f"{s['type']}: {s['value']} ({s['freq']:.2f})"
+                                
+                                st.checkbox(
+                                    label, 
+                                    value=is_checked, 
+                                    key=key, 
+                                    on_change=toggle_filter_from_suggestion, 
+                                    args=(i, s['type'], s['value'])
+                                )
+                        else:
+                            st.caption("Нет вариантов")
+    
     st.markdown("---")
 
     apply_col, sql_col, save_set_col, load_set_col = st.columns(4)
@@ -467,6 +511,31 @@ if apply_button:
             st.session_state.results = []
             st.error("Ошибка выполнения запроса к базе данных.")
 
+if st.session_state.show_word_analysis and st.session_state.results:
+    st.markdown("### Анализ слов по позициям", unsafe_allow_html=True)
+    position_word_counts = analyze_words_by_position(tuple(st.session_state.results))
+
+    num_columns = 7
+    columns = st.columns(num_columns)
+
+    sorted_positions = sorted(position_word_counts.keys())
+
+    for i, position in enumerate(sorted_positions):
+        with columns[i % num_columns]:
+            st.markdown(f"**Позиция {position + 1}**")
+            word_counts = position_word_counts[position]
+            sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
+            df_position = pd.DataFrame(sorted_words, columns=["Слово", "Количество"])
+            st.dataframe(
+                df_position,
+                column_config={
+                    "Слово": st.column_config.TextColumn(width="small"),
+                    "Количество": st.column_config.NumberColumn(width="small")
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+
 with main_col2:
     if st.session_state.results:
         st.markdown(f"### Результаты <small>({len(st.session_state.results)})</small>", unsafe_allow_html=True)
@@ -474,7 +543,6 @@ with main_col2:
         st.subheader("Результаты")
 
     if st.session_state.results:
-        # Меняем порядок данных для соответствия новому порядку столбцов
         swapped_results = [(res[1], res[0]) for res in st.session_state.results]
         df_results = pd.DataFrame(swapped_results, columns=["Частотность (млн)", "Фраза"])
         
@@ -496,50 +564,7 @@ with main_col2:
         if st.button("Анализ слов по позициям"):
             st.session_state.show_word_analysis = True
 
-if st.session_state.show_word_analysis and st.session_state.results:
-    st.subheader("Анализ слов по позициям")
 
-    @st.cache_data
-    def analyze_words_by_position(_results_tuple):
-        results = list(_results_tuple)
-        position_word_count = {}
-        # Считаем количество вхождений каждого слова на каждой позиции локально
-        for phrase_text, _ in results:  # Игнорируем глобальную частотность
-            words = phrase_text.split()
-            for i, word in enumerate(words):
-                if i not in position_word_count:
-                    position_word_count[i] = {}
-                position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
-        return position_word_count
 
-    word_analysis_data = analyze_words_by_position(tuple(map(tuple, st.session_state.results)))
-    max_position = max(word_analysis_data.keys()) if word_analysis_data else -1
-    
-    if max_position > -1:
-        tables_per_row = 7  # Увеличиваем количество таблиц в ряду до 7
-        positions = sorted(word_analysis_data.keys())
 
-        for i in range(0, len(positions), tables_per_row):
-            cols = st.columns(tables_per_row)
-            row_positions = positions[i:i + tables_per_row]
 
-            for j, position in enumerate(row_positions):
-                with cols[j]:
-                    st.markdown(f"**Позиция {position + 1}**")
-                    if position in word_analysis_data:
-                        sorted_words = sorted(word_analysis_data[position].items(), key=lambda item: item[1], reverse=True)
-                        # Меняем порядок столбцов: сначала Количество, потом Слово
-                        df_pos = pd.DataFrame([(count, word) for word, count in sorted_words], columns=["Количество", "Слово"])
-                        
-                        st.dataframe(
-                            df_pos,
-                            column_config={
-                                "Количество": st.column_config.NumberColumn(format="%d", width="small"),
-                                "Слово": st.column_config.TextColumn(width="small")
-                            },
-                            use_container_width=True,
-                            height=300,
-                            hide_index=True
-                        )
-                    else:
-                        st.info("Нет данных")

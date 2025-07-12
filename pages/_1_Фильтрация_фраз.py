@@ -23,6 +23,11 @@ from core.database import (
 # --- Управление состоянием ---
 st.set_page_config(layout="wide", page_title="Фильтрация фраз")
 
+# Check authentication status
+if 'logged_in' not in st.session_state or not st.session_state.logged_in:
+    st.warning("Пожалуйста, войдите в систему, чтобы получить доступ к этой странице.")
+    st.switch_page("Home.py")
+
 if 'filter_blocks' not in st.session_state: st.session_state.filter_blocks = []
 if 'selected_lengths' not in st.session_state: st.session_state.selected_lengths = []
 if 'last_query' not in st.session_state: st.session_state.last_query = ""

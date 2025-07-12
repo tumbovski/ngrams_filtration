@@ -392,7 +392,8 @@ with main_col1:
     pos_options = list(range(1, max_len + 1))
 
     for block in st.session_state.filter_blocks:
-        with st.container(border=True):
+        expander_title = f"Позиция {block['position'] + 1}"
+        with st.expander(expander_title, expanded=True):
             block_id = block['id']
             
             header_cols = st.columns([2, 1.3], vertical_alignment="bottom")
@@ -409,7 +410,7 @@ with main_col1:
                     manage_block_dialog(block_id)
                 btn_cols[1].button("Удалить", on_click=remove_block, args=(block_id,), key=f"rem_block_{block_id}", help="Удалить блок", use_container_width=True)
             
-            st.markdown("--- ")
+            # st.markdown("--- ") # Removed as expander provides visual separation
 
             for rule in block['rules']:
                 rule_id = rule['id']

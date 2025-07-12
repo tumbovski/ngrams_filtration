@@ -1,83 +1,95 @@
 # N-gram Filtering and Analysis Application
 
-## Описание проекта
-Интерактивное веб-приложение на Streamlit для фильтрации и анализа синтаксических n-грамм из базы данных PostgreSQL. Позволяет пользователям динамически конструировать сложные запросы для выявления лингвистических шаблонов.
+## Project Description
+An interactive Streamlit web application designed for complex filtering and analysis of syntactic n-grams (sequences of words) stored in a PostgreSQL database. The application allows users to dynamically construct queries to identify linguistic patterns and perform frequency analysis of words by position in filtered phrases.
 
-## Основные возможности
-- Динамическая фильтрация n-грамм по длине и лингвистическим признакам (токен, лемма, часть речи, тег, синтаксическая зависимость, морфология).
-- Сохранение и загрузка наборов фильтров и шаблонов блоков для повторного использования.
-- Просмотр сгенерированных SQL-запросов.
-- Частотный анализ слов по позициям в отфильтрованных фразах.
-- Модульная архитектура для легкого расширения и поддержки.
+## Key Features
+- **Dynamic Filtering:** Create multi-level filtering rules based on phrase length and characteristics of each word (token, lemma, part of speech, tag, syntactic dependency, morphology).
+- **Save and Load:** Ability to save and load entire filter sets as well as individual block templates for reuse.
+- **SQL Query View:** The application displays the generated SQL query, ensuring transparency and aiding in debugging.
+- **Results Analysis:** After obtaining filtered phrases, a frequency analysis of words can be performed for each position, showing the most frequent words and their counts.
+- **Caching:** Repeated database queries are cached to speed up performance.
+- **Modular Architecture:** The project is organized modularly for ease of development and scalability.
 
-## Начало работы
+## Getting Started
 
-### Предварительные требования
+### Prerequisites
 - Python 3.8+
-- PostgreSQL (с установленной базой данных `ngrams_2_0` и необходимой схемой)
+- PostgreSQL (with the `ngrams_2_0` database and necessary schema set up)
 
-### Установка
-1.  Клонируйте репозиторий:
-    ```bash
-    git clone <URL_ВАШЕГО_РЕПОЗИТОРИЯ>
-    cd patterns_filtration
-    ```
-2.  Установите зависимости:
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Installation
+1. Clone the repository:
+   ```bash
+   git clone <YOUR_REPOSITORY_URL>
+   cd patterns_filtration
+   ```
+2. Install dependencies:
+   ```bash
+   pip install -r ngrams_app/requirements.txt
+   ```
 
-### Настройка базы данных
-1.  Убедитесь, что у вас есть база данных PostgreSQL с именем `ngrams_2_0` и таблицами `ngrams`, `saved_filters`, `saved_blocks` (структура описана в `app_documentation.md`).
-2.  Создайте файл `.env` в корневой директории проекта (`patterns_filtration/`) со следующими данными для подключения к БД:
-    ```
-    DB_HOST=localhost
-    DB_NAME=ngrams_2_0
-    DB_USER=postgres
-    DB_PASSWORD=ВАШ_ПАРОЛЬ
-    ```
-    **Важно:** Файл `.env` добавлен в `.gitignore` и не будет загружен в репозиторий.
+### Database Setup
+1. Ensure you have a PostgreSQL database named `ngrams_2_0` with the `ngrams`, `saved_filters`, and `saved_blocks` tables.
+2. Table structure:
+   - `ngrams`: Main data table.
+     - `id`: Unique identifier.
+     - `text` (TEXT): N-gram text.
+     - `len` (INTEGER): N-gram length in tokens.
+     - `freq_mln` (NUMERIC): Normalized frequency (per million).
+     - `frequency` (INTEGER): Absolute frequency.
+     - `tokens` (JSONB): Array of tokens. `["word1", "word2"]`
+     - `lemmas` (JSONB): Array of lemmas. `["lemma1", "lemma2"]`
+     - `pos` (JSONB): Array of parts of speech. `["NOUN", "VERB"]`
+     - `tags` (JSONB): Array of grammatical tags. `["Animacy=Anim", "Aspect=Imp"]`
+     - `deps` (JSONB): Array of syntactic dependencies. `["nsubj", "root"]`
+     - `morph` (JSONB): Array of full morphological features in nested JSON format. `[{"Feat1": "Val1"}, {"Feat2": "Val2"}]`
+   - `saved_filters`: Table for storing filter sets.
+     - `name` (TEXT, PRIMARY KEY): Unique set name.
+     - `filters_json` (JSONB): JSON object with saved parameters.
+   - `saved_blocks`: Table for storing block templates.
+     - `name` (TEXT, PRIMARY KEY): Unique template name.
+     - `block_json` (JSONB): JSON object with the saved block.
+3. Create a `.env` file in the `ngrams_app/` directory with the following database connection details:
+   ```
+   DB_HOST=localhost
+   DB_NAME=ngrams_2_0
+   DB_USER=postgres
+   DB_PASSWORD=YOUR_PASSWORD
+   ```
+   **Important:** The `.env` file is added to `.gitignore` and will not be uploaded to the repository.
 
-### Запуск приложения
-1.  Перейдите в корневую директорию проекта:
-    ```bash
-    cd patterns_filtration
-    ```
-2.  Запустите приложение с помощью BAT-файла (для Windows):
-    ```bash
-    run_app.bat
-    ```
-    Или вручную:
-    ```bash
-    cd ngrams_app
-    streamlit run Home.py
-    ```
-    Приложение откроется в вашем веб-браузере.
+### Running the Application
+1. Navigate to the project root directory `patterns_filtration`:
+   ```bash
+   cd patterns_filtration
+   ```
+2. Run the application:
+   ```bash
+   streamlit run ngrams_app/Home.py
+   ```
+   The application will open in your web browser.
 
-## Структура проекта
-Проект организован модульно для удобства разработки и масштабирования:
--   `ngrams_app/`: Основная директория приложения.
-    -   `pages/`: Содержит отдельные страницы Streamlit приложения.
-    -   `core/`: Модули с основной логикой (работа с БД, аутентификация и т.д.).
-    -   `.env`: Файл для хранения переменных окружения (секретов).
-    -   `Home.py`: Главная страница приложения.
--   `requirements.txt`: Список Python-зависимостей.
--   `app_documentation.md`: Подробная документация по приложению.
--   `update_freq_mln.py`: Скрипт для обновления частотностей в БД.
+## Project Structure
+- `ngrams_app/`: Main application directory.
+  - `pages/`: Contains individual Streamlit application pages (`1_Фильтрация_фраз.py`).
+  - `core/`: Modules with core logic (DB interaction, authentication, etc., e.g., `database.py`).
+  - `.env`: File for storing environment variables (secrets).
+  - `Home.py`: Main application page.
+  - `requirements.txt`: List of Python dependencies.
+  - `app_documentation.md`: Detailed application documentation (for developers).
 
-## Использование
-После запуска приложения вы можете:
-1.  Выбрать страницу "Фильтрация фраз" в боковом меню.
-2.  Указать желаемую длину фраз.
-3.  Добавить блоки фильтров, настроить позиции и правила для каждого слова.
-4.  Применить фильтры и просмотреть результаты.
-5.  Использовать функции сохранения/загрузки наборов фильтров и шаблонов блоков.
+## Usage
+After launching the application, you can:
+1. Select the "Phrase Filtering" page from the sidebar menu.
+2. Specify the desired phrase length.
+3. Add filter blocks, configure positions and rules for each word (token, lemma, part of speech, tag, syntactic dependency, morphology).
+4. Use the "DEP", "POS", "TAG" buttons to fill blocks by template based on frequent sequences.
+5. Apply filters and view results in the right column.
+6. Expand the "Word Analysis by Position" block below the results table to see a frequency analysis of words for each position.
+7. Use the "Save Set" and "Load Set" functions to manage filter configurations.
+8. View the generated SQL query by clicking the "SQL" button.
 
-## Дальнейшее развитие
--   Реализация системы авторизации с различными уровнями доступа (админ, модератор).
--   Добавление новых страниц и функционала.
--   Развертывание на Streamlit Cloud.
-
-
-# ngrams_filtration
-
+## Future Development
+- Implementation of an authorization system with different access levels (admin, moderator).
+- Addition of new pages and functionality.
+- Deployment on Streamlit Cloud.

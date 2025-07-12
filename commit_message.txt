@@ -1,1 +1,1 @@
-Fix: Word analysis display and add total word count per position
+Docs: Translate README to English

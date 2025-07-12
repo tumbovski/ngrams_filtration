@@ -2,6 +2,7 @@ import psycopg2
 import json
 import os
 from dotenv import load_dotenv
+import bcrypt
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -25,6 +26,123 @@ def get_db_connection():
     except psycopg2.OperationalError as e:
         print(f"Ошибка подключения к БД: {e}")
         return None
+
+# --- Функции для работы с пользователями ---
+def add_user(conn, login, nickname, password, role, status):
+    if not conn: return False
+    try:
+        hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO users (login, nickname, password_hash, role, status) VALUES (%s, %s, %s, %s, %s);",
+                (login, nickname, hashed_password, role, status)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при добавлении пользователя: {e}")
+        conn.rollback()
+        return False
+
+def get_user_by_login(conn, login):
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, login, nickname, password_hash, role, status FROM users WHERE login = %s;", (login,))
+            user_data = cur.fetchone()
+            if user_data:
+                return {
+                    "id": user_data[0],
+                    "login": user_data[1],
+                    "nickname": user_data[2],
+                    "password_hash": user_data[3],
+                    "role": user_data[4],
+                    "status": user_data[5]
+                }
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении пользователя по логину: {e}")
+        return None
+
+def get_user_by_id(conn, user_id):
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, login, nickname, password_hash, role, status FROM users WHERE id = %s;", (user_id,))
+            user_data = cur.fetchone()
+            if user_data:
+                return {
+                    "id": user_data[0],
+                    "login": user_data[1],
+                    "nickname": user_data[2],
+                    "password_hash": user_data[3],
+                    "role": user_data[4],
+                    "status": user_data[5]
+                }
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении пользователя по ID: {e}")
+        return None
+
+def authenticate_user(conn, login, password):
+    user = get_user_by_login(conn, login)
+    if user:
+        if bcrypt.checkpw(password.encode('utf-8'), user["password_hash"].encode('utf-8')):
+            return user
+    return None
+
+def get_all_moderators(conn):
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, login, nickname, role, status FROM users WHERE role = 'moderator' ORDER BY nickname;")
+            return [{"id": row[0], "login": row[1], "nickname": row[2], "role": row[3], "status": row[4]} for row in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка при получении списка модераторов: {e}")
+        return []
+
+def update_user_status(conn, user_id, status):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET status = %s WHERE id = %s;", (status, user_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при обновлении статуса пользователя: {e}")
+        conn.rollback()
+        return False
+
+def update_user_details(conn, user_id, nickname, password=None, role=None):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            query_parts = []
+            params = []
+            if nickname is not None:
+                query_parts.append("nickname = %s")
+                params.append(nickname)
+            if password is not None:
+                hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                query_parts.append("password_hash = %s")
+                params.append(hashed_password)
+            if role is not None:
+                query_parts.append("role = %s")
+                params.append(role)
+            
+            if not query_parts:
+                return False # No fields to update
+
+            query = f"UPDATE users SET {', '.join(query_parts)} WHERE id = %s;"
+            params.append(user_id)
+            
+            cur.execute(query, tuple(params))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при обновлении данных пользователя: {e}")
+        conn.rollback()
+        return False
 
 # --- Функции для работы с данными ---
 def get_all_unique_lengths(conn):

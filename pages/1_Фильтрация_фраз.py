@@ -27,7 +27,7 @@ if 'filter_blocks' not in st.session_state: st.session_state.filter_blocks = []
 if 'selected_lengths' not in st.session_state: st.session_state.selected_lengths = []
 if 'last_query' not in st.session_state: st.session_state.last_query = ""
 if 'results' not in st.session_state: st.session_state.results = []
-if 'show_word_analysis' not in st.session_state: st.session_state.show_word_analysis = False
+
 if 'current_filters_hash' not in st.session_state: st.session_state.current_filters_hash = None
 
 # --- Подключение к БД и кэширование ---
@@ -87,17 +87,7 @@ def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple):
     filter_blocks = make_mutable(filter_blocks_tuple)
     return get_suggestion_data(conn, selected_lengths, filter_blocks)
 
-@st.cache_data(ttl=3600)
-def analyze_words_by_position(_results_tuple):
-    results = list(_results_tuple)
-    position_word_count = {}
-    for phrase_text, _ in results:
-        words = phrase_text.split()
-        for i, word in enumerate(words):
-            if i not in position_word_count:
-                position_word_count[i] = {}
-            position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
-    return position_word_count
+
 
 # --- Функции-коллбэки и хендлеры ---
 def clear_caches():
@@ -497,7 +487,7 @@ with main_col1:
         load_set_dialog()
 
 def _run_query():
-    st.session_state.show_word_analysis = False
+    
     if not st.session_state.selected_lengths:
         st.session_state.results = []
         st.session_state.last_query = ""
@@ -539,30 +529,8 @@ if st.session_state.current_filters_hash != current_filters_hash:
     st.session_state.current_filters_hash = current_filters_hash
     _run_query()
 
-if st.session_state.show_word_analysis and st.session_state.results:
-    st.markdown("### Анализ слов по позициям", unsafe_allow_html=True)
-    position_word_counts = analyze_words_by_position(tuple(st.session_state.results))
-
-    num_columns = 7
-    columns = st.columns(num_columns)
-
-    sorted_positions = sorted(position_word_counts.keys())
-
-    for i, position in enumerate(sorted_positions):
-        with columns[i % num_columns]:
-            st.markdown(f"**Позиция {position + 1}**")
-            word_counts = position_word_counts[position]
-            sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
-            df_position = pd.DataFrame(sorted_words, columns=["Слово", "Количество"])
-            st.dataframe(
-                df_position,
-                column_config={
-                    "Слово": st.column_config.TextColumn(width="small"),
-                    "Количество": st.column_config.NumberColumn(width="small")
-                },
-                use_container_width=True,
-                hide_index=True
-            )
+        
+        
 
 with main_col2:
     if st.session_state.results:
@@ -589,8 +557,29 @@ with main_col2:
             hide_index=True
         )
         
-        if st.button("Анализ слов по позициям"):
-            st.session_state.show_word_analysis = True
+        with st.expander("Анализ слов по позициям"):
+            position_word_count = {}
+            for phrase_text, _ in st.session_state.results:
+                words = phrase_text.split()
+                for i, word in enumerate(words):
+                    if i not in position_word_count:
+                        position_word_count[i] = {}
+                    position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
+
+            num_columns = 7
+            sorted_positions = sorted(position_word_count.keys())
+            
+            # Создаем колонки динамически, чтобы избежать ошибок при малом количестве позиций
+            cols = st.columns(min(len(sorted_positions), num_columns))
+
+            for i, position in enumerate(sorted_positions):
+                with cols[i % num_columns]:
+                    word_counts = position_word_count[position]
+                    total_words_in_position = sum(word_counts.values())
+                    st.markdown(f"**Позиция {position + 1} ({total_words_in_position})**")
+                    sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
+                    for word, count in sorted_words:
+                        st.markdown(f"- {word} ({count})")
 
 
 

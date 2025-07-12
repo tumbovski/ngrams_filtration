@@ -28,6 +28,7 @@ if 'selected_lengths' not in st.session_state: st.session_state.selected_lengths
 if 'last_query' not in st.session_state: st.session_state.last_query = ""
 if 'results' not in st.session_state: st.session_state.results = []
 if 'show_word_analysis' not in st.session_state: st.session_state.show_word_analysis = False
+if 'current_filters_hash' not in st.session_state: st.session_state.current_filters_hash = None
 
 # --- Подключение к БД и кэширование ---
 @st.cache_resource
@@ -373,18 +374,25 @@ main_col1, main_col2 = st.columns([2, 1.5])
 with main_col1:
     st.subheader("Параметры фильтрации")
     
-    st.multiselect(
-        "Длина фразы (токенов)",
-        options=cached_get_all_unique_lengths(),
-        default=st.session_state.selected_lengths,
-        key="selected_lengths_widget",
-        on_change=handle_length_change
-    )
+    st.markdown("**Длина фразы (токенов) / Заполнение по шаблону:**")
+    top_row_cols = st.columns([2, 1, 1, 1])
 
-    fill_cols = st.columns(3)
-    if fill_cols[0].button("Заполнить DEP", use_container_width=True): fill_sequence_dialog("dep")
-    if fill_cols[1].button("Заполнить POS", use_container_width=True): fill_sequence_dialog("pos")
-    if fill_cols[2].button("Заполнить TAG", use_container_width=True): fill_sequence_dialog("tag")
+    with top_row_cols[0]:
+        st.multiselect(
+            "Длина фразы (токенов)",
+            options=cached_get_all_unique_lengths(),
+            default=st.session_state.selected_lengths,
+            key="selected_lengths_widget",
+            on_change=handle_length_change,
+            label_visibility="collapsed" # Скрываем метку
+        )
+
+    with top_row_cols[1]:
+        st.button("DEP", use_container_width=True, on_click=fill_sequence_dialog, args=("dep",))
+    with top_row_cols[2]:
+        st.button("POS", use_container_width=True, on_click=fill_sequence_dialog, args=("pos",))
+    with top_row_cols[3]:
+        st.button("TAG", use_container_width=True, on_click=fill_sequence_dialog, args=("tag",))
 
     st.markdown("---")
 
@@ -476,8 +484,7 @@ with main_col1:
     
     st.markdown("---")
 
-    apply_col, sql_col, save_set_col, load_set_col = st.columns(4)
-    apply_button = apply_col.button("Применить фильтры", type="primary", use_container_width=True)
+    sql_col, save_set_col, load_set_col = st.columns(3)
 
     if sql_col.button("SQL", use_container_width=True):
         if st.session_state.last_query:
@@ -489,28 +496,48 @@ with main_col1:
     if load_set_col.button("Загрузить набор", use_container_width=True):
         load_set_dialog()
 
-if apply_button:
+def _run_query():
     st.session_state.show_word_analysis = False
     if not st.session_state.selected_lengths:
-        st.warning("Выберите хотя бы одну длину фразы.")
-    elif not st.session_state.filter_blocks or not any(rule['values'] for block in st.session_state.filter_blocks for rule in block['rules']):
-        st.warning("Добавьте и настройте хотя бы один фильтр.")
+        st.session_state.results = []
+        st.session_state.last_query = ""
+        return
+    
+    # Проверяем, есть ли активные правила в блоках фильтров
+    has_active_filters = any(rule['values'] for block in st.session_state.filter_blocks for rule in block['rules'])
+
+    if not st.session_state.filter_blocks or not has_active_filters:
+        # Если нет блоков или нет активных правил, показываем предупреждение и очищаем результаты
+        st.session_state.results = []
+        st.session_state.last_query = ""
+        return
+
+    where_clauses = build_where_clauses(st.session_state.filter_blocks)
+    query = f"""
+        SELECT text, freq_mln
+        FROM ngrams
+        WHERE len IN ({', '.join(map(str, st.session_state.selected_lengths))})
+        {'AND ' + ' AND '.join(where_clauses) if where_clauses else ''}
+        ORDER BY frequency DESC;
+    """
+    st.session_state.last_query = query.strip()
+    results = execute_query(conn, st.session_state.last_query)
+    if results is not None:
+        st.session_state.results = results
     else:
-        where_clauses = build_where_clauses(st.session_state.filter_blocks)
-        query = f"""
-            SELECT text, freq_mln
-            FROM ngrams
-            WHERE len IN ({', '.join(map(str, st.session_state.selected_lengths))})
-            {'AND ' + ' AND '.join(where_clauses) if where_clauses else ''}
-            ORDER BY frequency DESC;
-        """
-        st.session_state.last_query = query.strip()
-        results = execute_query(conn, st.session_state.last_query)
-        if results is not None:
-            st.session_state.results = results
-        else:
-            st.session_state.results = []
-            st.error("Ошибка выполнения запроса к базе данных.")
+        st.session_state.results = []
+        st.error("Ошибка выполнения запроса к базе данных.")
+
+# --- Автоматическое обновление результатов ---
+current_filters_state = {
+    "lengths": st.session_state.selected_lengths,
+    "blocks": st.session_state.filter_blocks
+}
+current_filters_hash = hash(make_hashable(current_filters_state))
+
+if st.session_state.current_filters_hash != current_filters_hash:
+    st.session_state.current_filters_hash = current_filters_hash
+    _run_query()
 
 if st.session_state.show_word_analysis and st.session_state.results:
     st.markdown("### Анализ слов по позициям", unsafe_allow_html=True)

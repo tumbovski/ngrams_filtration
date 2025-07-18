@@ -21,7 +21,7 @@ from core.database import (
 )
 
 # --- Управление состоянием ---
-st.set_page_config(layout="wide", page_title="Фильтрация фраз")
+st.set_page_config(layout="wide", page_title="Phrase Filtration")
 
 # Check authentication status
 if 'logged_in' not in st.session_state or not st.session_state.logged_in:
@@ -363,7 +363,7 @@ def load_set_dialog():
         st.rerun()
 
 # --- Основной интерфейс ---
-st.title("Фильтрация фраз")
+st.title("Phrase Filtration")
 main_col1, main_col2 = st.columns([2, 1.5])
 
 with main_col1:

@@ -100,7 +100,7 @@ else:
 
     # Conditional page links
     if st.session_state.logged_in:
-        st.sidebar.page_link("pages/_1_Фильтрация_фраз.py", label="Фильтрация фраз", icon="🔍")
+        st.sidebar.page_link("pages/_Phrase_Filtration.py", label="Phrase Filtration", icon="🔍")
         if st.session_state.user_role == 'admin':
             st.sidebar.page_link("pages/_Admin_Panel.py", label="Панель администратора", icon="⚙️")
 

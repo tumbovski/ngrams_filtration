@@ -1,6 +1,0 @@
-Feature: Implement admin panel visibility and auto-login
-
-- Renamed Admin_Panel.py to _Admin_Panel.py for hidden navigation.
-- Added conditional page_link to Admin Panel in Home.py for admin users.
-- Implemented auto-login functionality using st.query_params.
-- Added get_user_by_id function to core/database.py.

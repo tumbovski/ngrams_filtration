@@ -48,7 +48,7 @@ if not st.session_state.logged_in:
         else:
             # Clear invalid user_id from cookie and URL
             if user_id_from_cookie:
-                cookies.delete('user_id')
+                del cookies['user_id']
                 cookies.save()
             if "user_id" in st.query_params:
                 del st.query_params["user_id"]

@@ -1,6 +1,5 @@
 streamlit
 psycopg2-binary
 python-dotenv
-pandas
 bcrypt
 streamlit-cookies-manager

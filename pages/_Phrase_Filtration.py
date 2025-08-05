@@ -474,7 +474,7 @@ with main_col1:
                     with cols[i]:
                         st.markdown(f"**Позиция {i+1}**")
                         if i in suggestion_data:
-                            for s in suggestion_data[i][:25]:
+                            for s in suggestion_data[i][:]:
                                 is_checked = (i, s['type'], s['value']) in active_filters
                                 key = f"suggest_{i}_{s['type']}_{s['value']}"
                                 label = f"{s['type']}: {s['value']} ({s['freq']:.2f})"

@@ -22,7 +22,8 @@ COLUMN_MAPPING = {
 def get_db_connection():
     """Создает и возвращает новое подключение к базе данных."""
     try:
-        conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
+        port_int = int(DB_PORT) if DB_PORT else 5432 # Добавим дефолтное значение на всякий случай
+        conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=port_int)
         return conn
     except psycopg2.OperationalError as e:
         print(f"Ошибка подключения к БД: {e}")

@@ -18,6 +18,9 @@ if 'user_id' not in st.session_state: st.session_state.user_id = None
 conn = get_db_connection()
 cookies = CookieManager()
 
+if not cookies.ready():
+    st.stop()
+
 # Auto-login from URL query parameter or cookie
 if not st.session_state.logged_in:
     user_id_from_cookie = cookies.get('user_id')

@@ -506,7 +506,7 @@ with main_col1:
                             for s in suggestion_data[i][:]:
                                 is_checked = (i, s['type'], s['value']) in active_filters
                                 key = f"suggest_{i}_{s['type']}_{s['value']}"
-                                label = f"{s['type']}: {s['value']} {format_number_with_spaces(s['freq'])}"
+                                label = f"{s['type']}: {s['value']}  \nF: {format_number_with_spaces(s['freq'])}  \nQ: {format_number_with_spaces(s['qty'])}"
                                 
                                 st.checkbox(
                                     label, 

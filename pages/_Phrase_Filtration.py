@@ -157,7 +157,7 @@ def handle_type_change(block_id, rule_id):
 
 def handle_values_change(block_id, rule_id, disp_opts):
     selected_disp = st.session_state[f"vals_{rule_id}"]
-    new_values = [disp_opts[s] for s in selected_disp]
+    new_values = [disp_opts[s] for s in selected_disp if s in disp_opts]
     for block in st.session_state.filter_blocks:
         if block['id'] == block_id:
             for rule in block['rules']:

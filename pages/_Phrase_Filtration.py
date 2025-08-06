@@ -292,7 +292,7 @@ def fill_sequence_dialog(sequence_type):
         sequence_values = seq[:-2]
         frequency = float(seq[-2])
         quantity = seq[-1]
-        options.append(f"{'_'.join(map(str,sequence_values))} (F: {frequency:.3f}, Q: {quantity})")
+        options.append(f"{'_'.join(map(str,sequence_values))} (F: {format_number_with_spaces(frequency)}, Q: {format_number_with_spaces(quantity)})")
 
     selected_option = st.selectbox("Последовательность", options)
 
@@ -455,7 +455,7 @@ with main_col1:
                 selected_lengths_tuple = tuple(st.session_state.selected_lengths)
                 unique_vals = cached_get_unique_values_for_rule(block['position'], rule['type'], selected_lengths_tuple, blocks_tuple, block_id, rule_id, st.session_state.min_frequency, st.session_state.min_quantity)
                 
-                disp_opts = {f"{v[0]} (F:{v[1]:.3f}, Q:{v[2]})" if v[1] is not None else f"{v[0]} (Q:{v[2]})" : v[0] for v in unique_vals}
+                disp_opts = {f"{v[0]} (F:{format_number_with_spaces(v[1])}, Q:{format_number_with_spaces(v[2])})" if v[1] is not None else f"{v[0]} (Q:{format_number_with_spaces(v[2])})" : v[0] for v in unique_vals}
                 default_disp = [k for k, v in disp_opts.items() if v in rule['values']]
                 
                 rule_cols[2].multiselect("Значения", list(disp_opts.keys()), default=default_disp, key=f"vals_{rule_id}", on_change=handle_values_change, kwargs=dict(block_id=block_id, rule_id=rule_id, disp_opts=disp_opts), label_visibility="collapsed")
@@ -568,7 +568,7 @@ if st.session_state.current_filters_hash != current_filters_hash:
 
 with main_col2:
     if st.session_state.results:
-        st.markdown(f"### Результаты <small>({len(st.session_state.results)})</small>", unsafe_allow_html=True)
+        st.markdown(f"### Результаты <small>({format_number_with_spaces(len(st.session_state.results))})</small>", unsafe_allow_html=True)
     else:
         st.subheader("Результаты")
 
@@ -580,7 +580,7 @@ with main_col2:
             df_results,
             column_config={
                 "Частотность (млн)": st.column_config.NumberColumn(
-                    width="small", format="%.3f"
+                    width="small", format="localized"
                 ),
                 "Фраза": st.column_config.TextColumn(
                     width="large"
@@ -614,10 +614,10 @@ with main_col2:
                     with cols[i % num_columns]:
                         word_counts = position_word_count[position]
                         total_words_in_position = sum(word_counts.values())
-                        st.markdown(f"**Позиция {position + 1} ({total_words_in_position})**")
+                        st.markdown(f"**Позиция {position + 1} ({format_number_with_spaces(total_words_in_position)})**")
                         sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
                         for word, count in sorted_words:
-                            st.markdown(f"- {word} ({count})")
+                            st.markdown(f"- {word} ({format_number_with_spaces(count)})")
 
 
 

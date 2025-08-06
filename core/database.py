@@ -168,7 +168,7 @@ def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_
     preceding_where_str = " AND " + " AND ".join(preceding_where_clauses) if preceding_where_clauses else ""
     base_where = f"jsonb_array_length(ngrams.{db_column_name}) > {position}"
 
-    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM ngrams WHERE {base_where} {preceding_where_str} GROUP BY 1 HAVING SUM(freq_mln) >= {min_frequency} AND COUNT(id) >= {min_quantity} ORDER BY 2 DESC;"
+    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM ngrams WHERE {base_where} {preceding_where_str} GROUP BY 1 HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d} ORDER BY 2 DESC;"
     if db_column_name == 'morph':
         field = f"jsonb_array_elements_text(ngrams.morph->{position})"
     else:
@@ -281,7 +281,7 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0
                             jsonb_typeof(ngrams.{db_column}->{i}) = 'array'
                             {base_where_str}
                         GROUP BY 1, 2, 3
-                        HAVING SUM(freq_mln) >= {min_frequency} AND COUNT(id) >= {min_quantity}
+                        HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d}
                     """)
                 else:
                     # Запрос для структуры "массив строк" (для dep, pos, tag)
@@ -297,7 +297,7 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0
                             jsonb_array_length(ngrams.{db_column}) > {i}
                             {base_where_str}
                         GROUP BY 1, 2, 3
-                        HAVING SUM(freq_mln) >= {min_frequency} AND COUNT(id) >= {min_quantity}
+                        HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d}
                     """)
 
     if not union_parts:

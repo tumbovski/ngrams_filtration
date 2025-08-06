@@ -112,7 +112,7 @@ def handle_length_change():
 def add_block():
     new_block_id = str(uuid.uuid4())
     new_rule_id = str(uuid.uuid4())
-    st.session_state.filter_blocks.append({'id': new_block_id, 'position': 0, 'rules': [{'id': new_rule_id, 'type': 'dep', 'values': []}]})
+    st.session_state.filter_blocks.append({'id': new_block_id, 'position': 0, 'rules': [{'id': new_rule_id, 'type': 'dep', 'values': [], 'operator': 'include'}]})
     clear_caches()
 
 def remove_block(block_id):
@@ -122,7 +122,7 @@ def remove_block(block_id):
 def add_rule(block_id):
     for block in st.session_state.filter_blocks:
         if block['id'] == block_id:
-            block['rules'].append({'id': str(uuid.uuid4()), 'type': 'dep', 'values': []})
+            block['rules'].append({'id': str(uuid.uuid4()), 'type': 'dep', 'values': [], 'operator': 'include'})
             break
     clear_caches()
 
@@ -151,18 +151,31 @@ def handle_type_change(block_id, rule_id):
                 if rule['id'] == rule_id and rule['type'] != new_type:
                     rule['type'] = new_type
                     rule['values'] = []
+                    # Сохраняем оператор при смене типа
+                    rule['operator'] = rule.get('operator', 'include') 
                     clear_caches()
                     break
             break
 
 def handle_values_change(block_id, rule_id, disp_opts):
     selected_disp = st.session_state[f"vals_{rule_id}"]
-    new_values = [disp_opts[s] for s in selected_disp]
+    new_values = [disp_opts[s] for s in selected_disp if s in disp_opts]
     for block in st.session_state.filter_blocks:
         if block['id'] == block_id:
             for rule in block['rules']:
                 if rule['id'] == rule_id:
                     rule['values'] = new_values
+                    clear_caches()
+                    break
+            break
+
+def handle_operator_change(block_id, rule_id):
+    new_operator = st.session_state[f"op_{rule_id}"]
+    for block in st.session_state.filter_blocks:
+        if block['id'] == block_id:
+            for rule in block['rules']:
+                if rule['id'] == rule_id and rule.get('operator', 'include') != new_operator:
+                    rule['operator'] = new_operator
                     clear_caches()
                     break
             break
@@ -421,10 +434,13 @@ with main_col1:
 
             for rule in block['rules']:
                 rule_id = rule['id']
-                rule_cols = st.columns([1, 2, 0.5])
+                rule_cols = st.columns([1, 1, 3, 0.5])
                 
+                current_operator_index = ['include', 'exclude'].index(rule.get('operator', 'include'))
+                rule_cols[0].radio("Оператор", ['include', 'exclude'], index=current_operator_index, key=f"op_{rule_id}", on_change=handle_operator_change, args=(block_id, rule_id), label_visibility="collapsed", horizontal=True)
+
                 current_type_index = ['dep', 'pos', 'tag', 'token', 'lemma', 'morph'].index(rule['type'])
-                rule_cols[0].selectbox("Тип", ['dep', 'pos', 'tag', 'token', 'lemma', 'morph'], index=current_type_index, key=f"type_{rule_id}", on_change=handle_type_change, args=(block_id, rule_id), label_visibility="collapsed")
+                rule_cols[1].selectbox("Тип", ['dep', 'pos', 'tag', 'token', 'lemma', 'morph'], index=current_type_index, key=f"type_{rule_id}", on_change=handle_type_change, args=(block_id, rule_id), label_visibility="collapsed")
                 
                 blocks_tuple = make_hashable(st.session_state.filter_blocks)
                 selected_lengths_tuple = tuple(st.session_state.selected_lengths)
@@ -433,9 +449,9 @@ with main_col1:
                 disp_opts = {f"{v[0]} (F:{v[1]:.3f}, Q:{v[2]})" if v[1] is not None else f"{v[0]} (Q:{v[2]})" : v[0] for v in unique_vals}
                 default_disp = [k for k, v in disp_opts.items() if v in rule['values']]
                 
-                rule_cols[1].multiselect("Значения", list(disp_opts.keys()), default=default_disp, key=f"vals_{rule_id}", on_change=handle_values_change, kwargs=dict(block_id=block_id, rule_id=rule_id, disp_opts=disp_opts), label_visibility="collapsed")
+                rule_cols[2].multiselect("Значения", list(disp_opts.keys()), default=default_disp, key=f"vals_{rule_id}", on_change=handle_values_change, kwargs=dict(block_id=block_id, rule_id=rule_id, disp_opts=disp_opts), label_visibility="collapsed")
 
-                rule_cols[2].button("🗑️", on_click=remove_rule, args=(block_id, rule_id), key=f"rem_rule_{rule_id}")
+                rule_cols[3].button("🗑️", on_click=remove_rule, args=(block_id, rule_id), key=f"rem_rule_{rule_id}")
             
             st.button("➕ Добавить правило", on_click=add_rule, args=(block_id,), key=f"add_rule_{block_id}")
 

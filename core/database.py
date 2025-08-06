@@ -259,7 +259,7 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks):
     for i in range(max_len):
         for rule_type in suggestion_types:
             is_filtered = any(
-                rule['type'] == rule_type and rule['values'] 
+                rule['type'] == rule_type and rule['values'] and rule.get('operator', 'include') == 'include'
                 for block in filter_blocks if block['position'] == i 
                 for rule in block['rules']
             )
@@ -436,12 +436,19 @@ def build_where_clauses(blocks, block_id_to_skip=None, rule_id_to_skip=None):
             if not rule['values']: continue
             db_col_type = COLUMN_MAPPING[rule['type']]
             values = rule['values']
+            operator = rule.get('operator', 'include') # По умолчанию 'include'
             if db_col_type == 'morph':
                 conditions = ' OR '.join([f"ngrams.morph->{position} @> '{json.dumps(v)}'::jsonb" for v in values])
-                block_rules.append(f"(jsonb_array_length(ngrams.morph) > {position} AND ({conditions}))")
+                if operator == 'exclude':
+                    block_rules.append(f"(jsonb_array_length(ngrams.morph) > {position} AND NOT ({conditions}))")
+                else:
+                    block_rules.append(f"(jsonb_array_length(ngrams.morph) > {position} AND ({conditions}))")
             else:
                 vals_str = ", ".join([f"'{v}'" for v in values])
-                block_rules.append(f"(jsonb_array_length(ngrams.{db_col_type}) > {position} AND ngrams.{db_col_type}->>{position} IN ({vals_str}))")
+                if operator == 'exclude':
+                    block_rules.append(f"(jsonb_array_length(ngrams.{db_col_type}) > {position} AND ngrams.{db_col_type}->>{position} NOT IN ({vals_str}))")
+                else:
+                    block_rules.append(f"(jsonb_array_length(ngrams.{db_col_type}) > {position} AND ngrams.{db_col_type}->>{position} IN ({vals_str}))")
         if block_rules:
             where_clauses.append(f"({' AND '.join(block_rules)})")
     return where_clauses

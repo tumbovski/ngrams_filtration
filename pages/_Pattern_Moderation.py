@@ -22,23 +22,31 @@ phrase_lengths_options = list(range(2, 13)) # 2 to 12
 st.session_state.setdefault('selected_phrase_length', phrase_lengths_options[0])
 st.session_state.setdefault('current_pattern_to_moderate', None)
 st.session_state.setdefault('remaining_patterns_count', 0)
+st.session_state.setdefault('current_ngrams', None)
 
 # --- Helper Functions ---
 def load_next_pattern():
     if st.session_state.selected_phrase_length and st.session_state.user_id:
-        st.session_state.current_pattern_to_moderate = get_next_unmoderated_pattern(
+        pattern = get_next_unmoderated_pattern(
             conn, st.session_state.user_id, st.session_state.selected_phrase_length
         )
+        st.session_state.current_pattern_to_moderate = pattern
         st.session_state.remaining_patterns_count = count_unmoderated_patterns(
             conn, st.session_state.user_id, st.session_state.selected_phrase_length
         )
+        if pattern:
+            st.session_state.current_ngrams = get_ngrams_by_pattern_text(conn, pattern['pattern_text'])
+        else:
+            st.session_state.current_ngrams = None
     else:
         st.session_state.current_pattern_to_moderate = None
         st.session_state.remaining_patterns_count = 0
+        st.session_state.current_ngrams = None
 
 def handle_phrase_length_change():
     st.session_state.selected_phrase_length = st.session_state.phrase_length_selector # Update session state
     st.session_state.current_pattern_to_moderate = None # Reset current pattern
+    st.session_state.current_ngrams = None # Reset ngrams
     load_next_pattern()
 
 def submit_moderation_action(pattern_id, user_id, rating, comment, tag):
@@ -54,8 +62,7 @@ def submit_moderation_action(pattern_id, user_id, rating, comment, tag):
 st.title("Модерация паттернов")
 
 # Phrase Length Selection
-phrase_lengths_options = list(range(2, 13)) # 2 to 12
-selected_length_ui = st.selectbox(
+st.selectbox(
     "Выберите длину паттерна для модерации:",
     options=phrase_lengths_options,
     key="phrase_length_selector",
@@ -63,15 +70,9 @@ selected_length_ui = st.selectbox(
     index=phrase_lengths_options.index(st.session_state.selected_phrase_length) if st.session_state.selected_phrase_length in phrase_lengths_options else 0
 )
 
-# Update session state if selectbox value changes
-if selected_length_ui != st.session_state.selected_phrase_length:
-    st.session_state.selected_phrase_length = selected_length_ui
-    handle_phrase_length_change()
-
-# Load initial pattern if length is selected and no pattern is loaded
-if st.session_state.selected_phrase_length and st.session_state.current_pattern_to_moderate is None:
+# Load initial pattern if not already loaded
+if st.session_state.current_pattern_to_moderate is None:
     load_next_pattern()
-    st.rerun()
 
 # Main layout with two columns
 moderation_details_col, ngrams_table_col = st.columns([2, 1])
@@ -104,11 +105,9 @@ with moderation_details_col:
 
 with ngrams_table_col:
     if st.session_state.current_pattern_to_moderate:
-        pattern = st.session_state.current_pattern_to_moderate
         st.subheader("Фразы, соответствующие паттерну")
-        ngrams_for_pattern = get_ngrams_by_pattern_text(conn, pattern['pattern_text'])
-        if ngrams_for_pattern:
-            df_ngrams = pd.DataFrame(ngrams_for_pattern, columns=["Фраза", "Частотность (млн)"])
+        if st.session_state.get('current_ngrams'):
+            df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Фраза", "Частотность (млн)"])
             st.dataframe(df_ngrams, use_container_width=True, hide_index=True, height=600)
         else:
             st.info("Нет фраз, соответствующих этому паттерну.")

@@ -157,7 +157,7 @@ def get_all_unique_lengths(conn):
         print(f"Ошибка при получении длин: {e}")
         return []
 
-def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude):
+def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency=0.0, min_quantity=0):
     if not conn: return []
     db_column_name = COLUMN_MAPPING.get(rule_type, rule_type)
     preceding_where_clauses = build_where_clauses(all_blocks, block_id_to_exclude, rule_id_to_exclude)
@@ -168,13 +168,13 @@ def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_
     preceding_where_str = " AND " + " AND ".join(preceding_where_clauses) if preceding_where_clauses else ""
     base_where = f"jsonb_array_length(ngrams.{db_column_name}) > {position}"
 
-    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM ngrams WHERE {base_where} {preceding_where_str} GROUP BY 1 ORDER BY 2 DESC;"
+    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM ngrams WHERE {base_where} {preceding_where_str} GROUP BY 1 HAVING SUM(freq_mln) >= {min_frequency} AND COUNT(id) >= {min_quantity} ORDER BY 2 DESC;"
     if db_column_name == 'morph':
         field = f"jsonb_array_elements_text(ngrams.morph->{position})"
     else:
         field = f"ngrams.{db_column_name}->>{position}"
     
-    query = query_template.format(field=field, base_where=base_where, preceding_where_str=preceding_where_str)
+    query = query_template.format(field=field, base_where=base_where, preceding_where_str=preceding_where_str, min_frequency=min_frequency, min_quantity=min_quantity)
     
     try:
         with conn.cursor() as cur:
@@ -235,7 +235,7 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
         print(f"Ошибка при получении частых последовательностей {sequence_type} для длины {phrase_length}: {e}")
         return []
 
-def get_suggestion_data(conn, selected_lengths, filter_blocks):
+def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0, min_quantity=0):
     """
     Получает данные для панели подсказок: доступные варианты фильтрации
     для каждой позиции, отсортированные по частотности.
@@ -273,13 +273,15 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks):
                             {i} as position, 
                             '{rule_type}' as type, 
                             jsonb_array_elements_text(ngrams.{db_column}->{i}) as value, 
-                            SUM(freq_mln) as frequency
+                            SUM(freq_mln) as frequency,
+                            COUNT(id) as quantity
                         FROM ngrams
                         WHERE 
                             jsonb_array_length(ngrams.{db_column}) > {i} AND
                             jsonb_typeof(ngrams.{db_column}->{i}) = 'array'
                             {base_where_str}
                         GROUP BY 1, 2, 3
+                        HAVING SUM(freq_mln) >= {min_frequency} AND COUNT(id) >= {min_quantity}
                     """)
                 else:
                     # Запрос для структуры "массив строк" (для dep, pos, tag)
@@ -288,12 +290,14 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks):
                             {i} as position, 
                             '{rule_type}' as type, 
                             ngrams.{db_column}->>{i} as value, 
-                            SUM(freq_mln) as frequency
+                            SUM(freq_mln) as frequency,
+                            COUNT(id) as quantity
                         FROM ngrams
                         WHERE 
                             jsonb_array_length(ngrams.{db_column}) > {i}
                             {base_where_str}
                         GROUP BY 1, 2, 3
+                        HAVING SUM(freq_mln) >= {min_frequency} AND COUNT(id) >= {min_quantity}
                     """)
 
     if not union_parts:
@@ -308,7 +312,7 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks):
             results = cur.fetchall()
             
             suggestion_data = {}
-            for pos, r_type, r_val, r_freq in results:
+            for pos, r_type, r_val, r_freq, r_qty in results:
                 if r_val is None or r_val == '': continue
                 
                 if pos not in suggestion_data:
@@ -317,7 +321,8 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks):
                 suggestion_data[pos].append({
                     "type": r_type,
                     "value": r_val,
-                    "freq": r_freq
+                    "freq": r_freq,
+                    "qty": r_qty
                 })
 
             for pos in suggestion_data:

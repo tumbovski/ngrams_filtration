@@ -34,6 +34,9 @@ if 'last_query' not in st.session_state: st.session_state.last_query = ""
 if 'results' not in st.session_state: st.session_state.results = []
 
 if 'current_filters_hash' not in st.session_state: st.session_state.current_filters_hash = None
+if 'show_word_analysis' not in st.session_state: st.session_state.show_word_analysis = False
+if 'min_frequency' not in st.session_state: st.session_state.min_frequency = 0.0
+if 'min_quantity' not in st.session_state: st.session_state.min_quantity = 0
 
 # --- Подключение к БД и кэширование ---
 @st.cache_resource
@@ -69,11 +72,11 @@ def format_number_with_spaces(number):
 def cached_get_all_unique_lengths():
     return get_all_unique_lengths(conn)
 
-@st.cache_data(ttl=3600)
-def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude):
+@st.cache_data(ttl=3601)
+def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity):
     all_blocks = make_mutable(blocks_tuple)
     selected_lengths = list(selected_lengths_tuple)
-    return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude)
+    return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity)
 
 @st.cache_data(ttl=3600)
 def cached_load_filter_set_names():
@@ -89,11 +92,11 @@ def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tu
     mutable_selected_lengths = list(selected_lengths_tuple)
     return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
 
-@st.cache_data(ttl=3600)
-def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple):
+@st.cache_data(ttl=3601)
+def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_frequency, min_quantity):
     selected_lengths = list(selected_lengths_tuple)
     filter_blocks = make_mutable(filter_blocks_tuple)
-    return get_suggestion_data(conn, selected_lengths, filter_blocks)
+    return get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity)
 
 
 
@@ -399,6 +402,12 @@ with main_col1:
             label_visibility="collapsed" # Скрываем метку
         )
 
+    min_freq_col, min_qty_col = st.columns(2)
+    with min_freq_col:
+        st.number_input("Мин. частотность (млн)", min_value=0.0, value=st.session_state.min_frequency, step=0.001, key="min_frequency_widget", on_change=lambda: setattr(st.session_state, 'min_frequency', st.session_state.min_frequency_widget))
+    with min_qty_col:
+        st.number_input("Мин. количество фраз", min_value=0, value=st.session_state.min_quantity, step=1, key="min_quantity_widget", on_change=lambda: setattr(st.session_state, 'min_quantity', st.session_state.min_quantity_widget))
+
     with top_row_cols[1]:
         st.button("DEP", use_container_width=True, on_click=fill_sequence_dialog, args=("dep",))
     with top_row_cols[2]:
@@ -444,7 +453,7 @@ with main_col1:
                 
                 blocks_tuple = make_hashable(st.session_state.filter_blocks)
                 selected_lengths_tuple = tuple(st.session_state.selected_lengths)
-                unique_vals = cached_get_unique_values_for_rule(block['position'], rule['type'], selected_lengths_tuple, blocks_tuple, block_id, rule_id)
+                unique_vals = cached_get_unique_values_for_rule(block['position'], rule['type'], selected_lengths_tuple, blocks_tuple, block_id, rule_id, st.session_state.min_frequency, st.session_state.min_quantity)
                 
                 disp_opts = {f"{v[0]} (F:{v[1]:.3f}, Q:{v[2]})" if v[1] is not None else f"{v[0]} (Q:{v[2]})" : v[0] for v in unique_vals}
                 default_disp = [k for k, v in disp_opts.items() if v in rule['values']]
@@ -476,7 +485,7 @@ with main_col1:
             selected_lengths_tuple = tuple(st.session_state.selected_lengths)
             filter_blocks_tuple = make_hashable(st.session_state.filter_blocks)
             
-            suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple)
+            suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, st.session_state.min_frequency, st.session_state.min_quantity)
 
             if not suggestion_data:
                 st.info("Нет доступных вариантов для дальнейшей фильтрации.")
@@ -582,29 +591,33 @@ with main_col2:
             hide_index=True
         )
         
-        with st.expander("Анализ слов по позициям"):
-            position_word_count = {}
-            for _, _, tokens_list in st.session_state.results:
-                words = tokens_list
-                for i, word in enumerate(words):
-                    if i not in position_word_count:
-                        position_word_count[i] = {}
-                    position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
+        if st.button("Показать анализ слов по позициям"):
+            st.session_state.show_word_analysis = not st.session_state.show_word_analysis
+        
+        if st.session_state.show_word_analysis:
+            with st.expander("Анализ слов по позициям", expanded=True):
+                position_word_count = {}
+                for _, _, tokens_list in st.session_state.results:
+                    words = tokens_list
+                    for i, word in enumerate(words):
+                        if i not in position_word_count:
+                            position_word_count[i] = {}
+                        position_word_count[i][word] = position_word_count[i].get(word, 0) + 1
 
-            num_columns = 7
-            sorted_positions = sorted(position_word_count.keys())
-            
-            # Создаем колонки динамически, чтобы избежать ошибок при малом количестве позиций
-            cols = st.columns(min(len(sorted_positions), num_columns))
+                num_columns = 7
+                sorted_positions = sorted(position_word_count.keys())
+                
+                # Создаем колонки динамически, чтобы избежать ошибок при малом количестве позиций
+                cols = st.columns(min(len(sorted_positions), num_columns))
 
-            for i, position in enumerate(sorted_positions):
-                with cols[i % num_columns]:
-                    word_counts = position_word_count[position]
-                    total_words_in_position = sum(word_counts.values())
-                    st.markdown(f"**Позиция {position + 1} ({total_words_in_position})**")
-                    sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
-                    for word, count in sorted_words:
-                        st.markdown(f"- {word} ({count})")
+                for i, position in enumerate(sorted_positions):
+                    with cols[i % num_columns]:
+                        word_counts = position_word_count[position]
+                        total_words_in_position = sum(word_counts.values())
+                        st.markdown(f"**Позиция {position + 1} ({total_words_in_position})**")
+                        sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
+                        for word, count in sorted_words:
+                            st.markdown(f"- {word} ({count})")
 
 
 

@@ -61,6 +61,9 @@ def make_mutable(obj):
         return list(make_mutable(v) for v in obj)
     return obj
 
+def format_number_with_spaces(number):
+    return f"{number:,.2f}".replace(",", " ")
+
 # --- Кэшируемые функции ---
 @st.cache_data(ttl=3600)
 def cached_get_all_unique_lengths():
@@ -270,15 +273,16 @@ def fill_sequence_dialog(sequence_type):
     
     options = []
     for seq in sequences_data:
-        sequence_values = seq[:-1]
-        frequency = seq[-1]
-        options.append(f"{'_'.join(map(str,sequence_values))} (Частотность: {frequency:.3f})")
+        sequence_values = seq[:-2]
+        frequency = float(seq[-2])
+        quantity = seq[-1]
+        options.append(f"{'_'.join(map(str,sequence_values))} (F: {frequency:.3f}, Q: {quantity})")
 
     selected_option = st.selectbox("Последовательность", options)
 
     if st.button("Заполнить"):
         if selected_option:
-            selected_values_str = selected_option.split(' (Частотность:')[0]
+            selected_values_str = selected_option.split(' (F:')[0]
             selected_values = selected_values_str.split('_')
 
             if len(selected_values) != phrase_length:
@@ -426,7 +430,7 @@ with main_col1:
                 selected_lengths_tuple = tuple(st.session_state.selected_lengths)
                 unique_vals = cached_get_unique_values_for_rule(block['position'], rule['type'], selected_lengths_tuple, blocks_tuple, block_id, rule_id)
                 
-                disp_opts = {f"{v[0]} (Фраз: {v[2]}, F: {v[1]:.3f})" if v[1] is not None else f"{v[0]} (Фраз: {v[2]})" : v[0] for v in unique_vals}
+                disp_opts = {f"{v[0]} (F:{v[1]:.3f}, Q:{v[2]})" if v[1] is not None else f"{v[0]} (Q:{v[2]})" : v[0] for v in unique_vals}
                 default_disp = [k for k, v in disp_opts.items() if v in rule['values']]
                 
                 rule_cols[1].multiselect("Значения", list(disp_opts.keys()), default=default_disp, key=f"vals_{rule_id}", on_change=handle_values_change, kwargs=dict(block_id=block_id, rule_id=rule_id, disp_opts=disp_opts), label_visibility="collapsed")
@@ -477,7 +481,7 @@ with main_col1:
                             for s in suggestion_data[i][:]:
                                 is_checked = (i, s['type'], s['value']) in active_filters
                                 key = f"suggest_{i}_{s['type']}_{s['value']}"
-                                label = f"{s['type']}: {s['value']} ({s['freq']:.2f})"
+                                label = f"{s['type']}: {s['value']} {format_number_with_spaces(s['freq'])}"
                                 
                                 st.checkbox(
                                     label, 
@@ -509,7 +513,7 @@ def _run_query():
 
     where_clauses = build_where_clauses(st.session_state.filter_blocks)
     query = f"""
-        SELECT text, freq_mln
+        SELECT text, freq_mln, tokens
         FROM ngrams
         WHERE len IN ({', '.join(map(str, st.session_state.selected_lengths))})
         {'AND ' + ' AND '.join(where_clauses) if where_clauses else ''}
@@ -564,8 +568,8 @@ with main_col2:
         
         with st.expander("Анализ слов по позициям"):
             position_word_count = {}
-            for phrase_text, _ in st.session_state.results:
-                words = phrase_text.split()
+            for _, _, tokens_list in st.session_state.results:
+                words = tokens_list
                 for i, word in enumerate(words):
                     if i not in position_word_count:
                         position_word_count[i] = {}

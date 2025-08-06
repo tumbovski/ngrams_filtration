@@ -213,7 +213,8 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
     query = f"""
         SELECT
             {select_clause},
-            SUM(freq_mln) as total_frequency
+            SUM(freq_mln) as total_frequency,
+            COUNT(*) as quantity
         FROM
             ngrams
         WHERE

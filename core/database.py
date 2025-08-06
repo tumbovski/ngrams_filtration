@@ -168,17 +168,17 @@ def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_
     preceding_where_str = " AND " + " AND ".join(preceding_where_clauses) if preceding_where_clauses else ""
     base_where = f"jsonb_array_length(ngrams.{db_column_name}) > {position}"
 
-    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM ngrams WHERE {base_where} {preceding_where_str} GROUP BY 1 HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d} ORDER BY 2 DESC;"
+    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM ngrams WHERE {base_where} {preceding_where_str} GROUP BY 1 HAVING SUM(freq_mln) >= %s AND COUNT(id) >= %s ORDER BY 2 DESC;"
     if db_column_name == 'morph':
         field = f"jsonb_array_elements_text(ngrams.morph->{position})"
     else:
         field = f"ngrams.{db_column_name}->>{position}"
     
-    query = query_template.format(field=field, base_where=base_where, preceding_where_str=preceding_where_str, min_frequency=min_frequency, min_quantity=min_quantity)
+    query = query_template.format(field=field, base_where=base_where, preceding_where_str=preceding_where_str)
     
     try:
         with conn.cursor() as cur:
-            cur.execute(query)
+            cur.execute(query, (min_frequency, min_quantity))
             return [(r[0], r[1], r[2]) for r in cur.fetchall() if r[0] is not None]
     except Exception as e:
         print(f"Ошибка при получении уникальных значений: {e}")
@@ -468,3 +468,164 @@ def execute_query(conn, query):
     except Exception as e:
         print(f"Ошибка выполнения запроса: {e}")
         return []
+
+# --- Функции для модерации паттернов ---
+def get_next_unmoderated_pattern(conn, user_id, phrase_length):
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT
+                    up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
+                    up.final_rating, up.final_tag, up.final_comment
+                FROM
+                    unique_patterns up
+                LEFT JOIN
+                    moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %s
+                WHERE
+                    up.phrase_length = %s AND mp.id IS NULL
+                ORDER BY
+                    up.total_frequency DESC
+                LIMIT 1;
+            """
+            cur.execute(query, (user_id, phrase_length))
+            row = cur.fetchone()
+            if row:
+                return {
+                    "id": row[0],
+                    "pattern_text": row[1],
+                    "phrase_length": row[2],
+                    "total_frequency": row[3],
+                    "total_quantity": row[4],
+                    "final_rating": row[5],
+                    "final_tag": row[6],
+                    "final_comment": row[7]
+                }
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении следующего неотмодерированного паттерна: {e}")
+        return None
+
+def count_unmoderated_patterns(conn, user_id, phrase_length):
+    if not conn: return 0
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT
+                    COUNT(up.id)
+                FROM
+                    unique_patterns up
+                LEFT JOIN
+                    moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %s
+                WHERE
+                    up.phrase_length = %s AND mp.id IS NULL;
+            """
+            cur.execute(query, (user_id, phrase_length))
+            count = cur.fetchone()[0]
+            return count
+    except Exception as e:
+        print(f"Ошибка при подсчете неотмодерированных паттернов: {e}")
+        return 0
+
+def get_ngrams_by_pattern_text(conn, pattern_text):
+    if not conn: return []
+    try:
+        print(f"DEBUG: get_ngrams_by_pattern_text - Input pattern_text: {pattern_text}")
+
+        query = """
+            SELECT
+                n.text,
+                n.freq_mln
+            FROM
+                ngrams n
+            WHERE
+                (
+                    SELECT STRING_AGG(elem->>0, '_')
+                    FROM jsonb_array_elements(n.deps) AS elem
+                ) || '_' ||
+                (
+                    SELECT STRING_AGG(elem->>0, '_')
+                    FROM jsonb_array_elements(n.pos) AS elem
+                ) || '_' ||
+                (
+                    SELECT STRING_AGG(elem->>0, '_')
+                    FROM jsonb_array_elements(n.tags) AS elem
+                ) = %s
+            ORDER BY
+                n.freq_mln DESC
+            LIMIT 100;
+        """
+        print(f"DEBUG: Generated SQL Query: {query}")
+        print(f"DEBUG: Query Parameters: [{pattern_text}] ")
+
+        with conn.cursor() as cur:
+            cur.execute(query, (pattern_text,))
+            return cur.fetchall()
+    except Exception as e:
+        print(f"Ошибка при получении ngrams по паттерну: {e}")
+        return []
+
+def save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO moderation_patterns (pattern_id, user_id, rating, comment, tag) VALUES (%s, %s, %s, %s, %s);",
+                (pattern_id, user_id, rating, comment, tag)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при сохранении записи модерации: {e}")
+        conn.rollback()
+        return False
+
+def process_moderation_submission(conn, pattern_id):
+    if not conn: return
+    try:
+        with conn.cursor() as cur:
+            # 1. Получаем все записи модерации для данного паттерна
+            cur.execute(
+                "SELECT user_id, rating, comment, tag FROM moderation_patterns WHERE pattern_id = %s;",
+                (pattern_id,)
+            )
+            moderation_records = cur.fetchall()
+
+            if not moderation_records: return # No records, nothing to process
+
+            # 2. Подсчитываем количество уникальных модераторов и средний рейтинг
+            unique_users = set()
+            total_rating = 0
+            for record in moderation_records:
+                unique_users.add(record[0]) # user_id
+                total_rating += record[1] # rating
+            
+            moderated_by_count = len(unique_users)
+            final_rating = total_rating / len(moderation_records) if moderation_records else None
+
+            # 3. Определяем final_tag и final_comment на основе совпадений
+            # Для простоты, если есть хотя бы 2 записи, и теги/комментарии совпадают, берем их.
+            # Более сложная логика (например, большинство голосов) может быть добавлена позже.
+            final_tag = None
+            final_comment = None
+
+            if len(moderation_records) >= 2:
+                # Проверяем совпадение тегов
+                tags = [r[3] for r in moderation_records if r[3] is not None and r[3] != '']
+                if len(tags) >= 2 and all(t == tags[0] for t in tags):
+                    final_tag = tags[0]
+                
+                # Проверяем совпадение комментариев
+                comments = [r[2] for r in moderation_records if r[2] is not None and r[2] != '']
+                if len(comments) >= 2 and all(c == comments[0] for c in comments):
+                    final_comment = comments[0]
+
+            # 4. Обновляем unique_patterns
+            cur.execute(
+                "UPDATE unique_patterns SET final_rating = %s, final_tag = %s, final_comment = %s, moderated_by_count = %s WHERE id = %s;",
+                (final_rating, final_tag, final_comment, moderated_by_count, pattern_id)
+            )
+            conn.commit()
+    except Exception as e:
+        print(f"Ошибка при обработке отправки модерации: {e}")
+        conn.rollback()

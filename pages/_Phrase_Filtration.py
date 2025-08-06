@@ -68,31 +68,86 @@ def format_number_with_spaces(number):
     return f"{number:,.2f}".replace(",", " ")
 
 # --- Кэшируемые функции ---
-@st.cache_data(ttl=3600)
+@st.cache_resource(ttl=3603)
+def init_connection():
+    return get_db_connection()
+
+conn = init_connection()
+
+if not conn:
+    st.error("Не удалось подключиться к базе данных. Проверьте настройки в .env файле и доступность сервера.")
+    st.stop()
+
+# --- Хелперы для кэширования (ИСПРАВЛЕННЫЕ) ---
+def make_hashable(obj):
+    if isinstance(obj, dict):
+        return frozenset((k, make_hashable(v)) for k, v in sorted(obj.items()))
+    if isinstance(obj, list):
+        return tuple(make_hashable(v) for v in obj)
+    return obj
+
+def make_mutable(obj):
+    if isinstance(obj, frozenset):
+        return {k: make_mutable(v) for k, v in obj}
+    if isinstance(obj, tuple):
+        return list(make_mutable(v) for v in obj)
+    return obj
+
+def format_number_with_spaces(number):
+    return f"{number:,.2f}".replace(",", " ")
+
+# --- Кэшируемые функции ---
+@st.cache_data(ttl=3603)
 def cached_get_all_unique_lengths():
     return get_all_unique_lengths(conn)
 
-@st.cache_data(ttl=3601)
+@st.cache_data(ttl=3603)
 def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity):
     all_blocks = make_mutable(blocks_tuple)
     selected_lengths = list(selected_lengths_tuple)
     return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3603)
 def cached_load_filter_set_names():
     return load_filter_set_names(conn)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3603)
 def cached_load_block_names():
     return load_block_names(conn)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3603)
 def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple):
     mutable_filter_blocks = make_mutable(filter_blocks_tuple)
     mutable_selected_lengths = list(selected_lengths_tuple)
     return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
 
-@st.cache_data(ttl=3601)
+@st.cache_data(ttl=3603)
+def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_frequency, min_quantity):
+    selected_lengths = list(selected_lengths_tuple)
+    filter_blocks = make_mutable(filter_blocks_tuple)
+    return get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity)
+
+@st.cache_data(ttl=3602)
+def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity):
+    all_blocks = make_mutable(blocks_tuple)
+    selected_lengths = list(selected_lengths_tuple)
+    return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity)
+
+@st.cache_data(ttl=3602)
+def cached_load_filter_set_names():
+    return load_filter_set_names(conn)
+
+@st.cache_data(ttl=3602)
+def cached_load_block_names():
+    return load_block_names(conn)
+
+@st.cache_data(ttl=3602)
+def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple):
+    mutable_filter_blocks = make_mutable(filter_blocks_tuple)
+    mutable_selected_lengths = list(selected_lengths_tuple)
+    return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
+
+@st.cache_data(ttl=3602)
 def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_frequency, min_quantity):
     selected_lengths = list(selected_lengths_tuple)
     filter_blocks = make_mutable(filter_blocks_tuple)

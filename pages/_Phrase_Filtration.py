@@ -536,42 +536,61 @@ with main_col1:
 
     # --- Панель подсказок ---
     if st.session_state.selected_lengths:
-        with st.expander("Подсказки для фильтрации", expanded=True):
-            selected_lengths_tuple = tuple(st.session_state.selected_lengths)
-            filter_blocks_tuple = make_hashable(st.session_state.filter_blocks)
-            
-            suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, st.session_state.min_frequency, st.session_state.min_quantity)
+        selected_lengths_tuple = tuple(st.session_state.selected_lengths)
+        filter_blocks_tuple = make_hashable(st.session_state.filter_blocks)
+        
+        suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, st.session_state.min_frequency, st.session_state.min_quantity)
 
-            if not suggestion_data:
+        if not suggestion_data:
+            with st.expander("Подсказки для фильтрации", expanded=True):
                 st.info("Нет доступных вариантов для дальнейшей фильтрации.")
-            else:
-                max_len_sugg = max(suggestion_data.keys()) + 1
-                cols = st.columns(max_len_sugg)
-                
-                active_filters = set()
-                for b in st.session_state.filter_blocks:
-                    for r in b['rules']:
-                        for v in r['values']:
-                            active_filters.add((b['position'], r['type'], v))
+        else:
+            # Reorganize data by type and then by position
+            suggestions_by_type_and_pos = {'dep': {}, 'pos': {}, 'tag': {}, 'morph': {}}
+            for position, suggestions in suggestion_data.items():
+                for s in suggestions:
+                    if s['type'] in suggestions_by_type_and_pos:
+                        if position not in suggestions_by_type_and_pos[s['type']]:
+                            suggestions_by_type_and_pos[s['type']][position] = []
+                        suggestions_by_type_and_pos[s['type']][position].append(s)
 
-                for i in range(max_len_sugg):
-                    with cols[i]:
-                        st.markdown(f"**Позиция {i+1}**")
-                        if i in suggestion_data:
-                            for s in suggestion_data[i][:]:
-                                is_checked = (i, s['type'], s['value']) in active_filters
-                                key = f"suggest_{i}_{s['type']}_{s['value']}"
-                                label = f"{s['type']}: {s['value']}  \nF: {format_number_with_spaces(s['freq'])}  \nQ: {format_number_with_spaces(s['qty'])}"
-                                
-                                st.checkbox(
-                                    label, 
-                                    value=is_checked, 
-                                    key=key, 
-                                    on_change=toggle_filter_from_suggestion, 
-                                    args=(i, s['type'], s['value'])
-                                )
-                        else:
-                            st.caption("Нет вариантов")
+            active_filters = set()
+            for b in st.session_state.filter_blocks:
+                for r in b['rules']:
+                    for v in r['values']:
+                        active_filters.add((b['position'], r['type'], v))
+
+            type_names = {
+                'dep': "Параметры фильтрации DEP",
+                'pos': "Параметры фильтрации POS",
+                'tag': "Параметры фильтрации TAG",
+                'morph': "Параметры фильтрации MORPH"
+            }
+
+            for s_type, pos_dict in suggestions_by_type_and_pos.items():
+                if pos_dict:
+                    with st.expander(type_names.get(s_type, s_type.upper()), expanded=False):
+                        
+                        sorted_positions = sorted(pos_dict.keys())
+                        num_columns = max(len(sorted_positions), 1)
+                        cols = st.columns(num_columns)
+
+                        for i, position in enumerate(sorted_positions):
+                            with cols[i]:
+                                st.markdown(f"**Позиция {position + 1}**")
+                                # Suggestions for this type and position are already sorted by frequency from the DB
+                                for s in pos_dict[position]:
+                                    is_checked = (position, s['type'], s['value']) in active_filters
+                                    key = f"suggest_{position}_{s['type']}_{s['value']}"
+                                    label = f"{s['value']}  \nF: {format_number_with_spaces(s['freq'])}  \nQ: {format_number_with_spaces(s['qty'])}"
+                                    
+                                    st.checkbox(
+                                        label, 
+                                        value=is_checked, 
+                                        key=key, 
+                                        on_change=toggle_filter_from_suggestion, 
+                                        args=(position, s['type'], s['value'])
+                                    )
     
     
 

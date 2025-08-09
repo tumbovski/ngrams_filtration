@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from core.database import get_db_connection, get_next_unmoderated_pattern, count_unmoderated_patterns, get_ngrams_by_pattern_text, save_moderation_record, process_moderation_submission
+from core.database import get_db_connection, get_next_unmoderated_pattern, count_unmoderated_patterns, get_examples_by_pattern_id, save_moderation_record, process_moderation_submission
 
 st.set_page_config(layout="wide", page_title="Pattern Moderation")
 
@@ -35,7 +35,7 @@ def load_next_pattern():
             conn, st.session_state.user_id, st.session_state.selected_phrase_length
         )
         if pattern:
-            st.session_state.current_ngrams = get_ngrams_by_pattern_text(conn, pattern['pattern_text'])
+            st.session_state.current_ngrams = get_examples_by_pattern_id(conn, pattern['id'])
         else:
             st.session_state.current_ngrams = None
     else:

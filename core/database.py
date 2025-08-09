@@ -527,11 +527,23 @@ def count_unmoderated_patterns(conn, user_id, phrase_length):
         print(f"Ошибка при подсчете неотмодерированных паттернов: {e}")
         return 0
 
-def get_ngrams_by_pattern_text(conn, pattern_text):
+def get_examples_by_pattern_id(conn, pattern_id):
     if not conn: return []
     try:
-        print(f"DEBUG: get_ngrams_by_pattern_text - Input pattern_text: {pattern_text}")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT example_text, example_frequency FROM pattern_examples WHERE pattern_id = %s ORDER BY example_frequency DESC;",
+                (pattern_id,)
+            )
+            return cur.fetchall()
+    except Exception as e:
+        print(f"Ошибка при получении примеров для паттерна: {e}")
+        return []
 
+def get_ngrams_by_pattern_text_for_population(conn, pattern_text):
+    if not conn: return []
+    try:
+        # This is the original, slow query, intended only for the population script.
         query = """
             SELECT
                 n.text,
@@ -553,16 +565,13 @@ def get_ngrams_by_pattern_text(conn, pattern_text):
                 ) = %s
             ORDER BY
                 n.freq_mln DESC
-            LIMIT 100;
+            LIMIT 50;
         """
-        print(f"DEBUG: Generated SQL Query: {query}")
-        print(f"DEBUG: Query Parameters: [{pattern_text}] ")
-
         with conn.cursor() as cur:
             cur.execute(query, (pattern_text,))
             return cur.fetchall()
     except Exception as e:
-        print(f"Ошибка при получении ngrams по паттерну: {e}")
+        print(f"Ошибка при получении ngrams для заполнения: {e}")
         return []
 
 def save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):

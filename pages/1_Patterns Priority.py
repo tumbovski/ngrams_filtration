@@ -58,8 +58,18 @@ def submit_moderation_action(pattern_id, user_id, rating, comment, tag):
     else:
         st.error("Ошибка при сохранении модерации.")
 
+def format_number_with_spaces(number):
+    try:
+        num = float(number)
+        if num == int(num):
+            return f"{int(num):,}".replace(",", " ")
+        else:
+            return f"{num:,.2f}".replace(",", " ")
+    except (ValueError, TypeError):
+        return number
+
 # --- Main UI ---
-st.title("Модерация паттернов")
+st.title("Приоритет модерации паттернов")
 
 # Phrase Length Selection
 st.selectbox(
@@ -80,11 +90,10 @@ moderation_details_col, ngrams_table_col = st.columns([2, 1])
 with moderation_details_col:
     if st.session_state.current_pattern_to_moderate:
         pattern = st.session_state.current_pattern_to_moderate
-        st.subheader(f"Паттерн: {pattern['pattern_text']}")
-        st.write(f"Длина фразы: {pattern['phrase_length']}")
-        st.write(f"Общая частотность: {pattern['total_frequency']:.3f}")
-        st.write(f"Общее количество фраз: {pattern['total_quantity']}")
-        st.write(f"Осталось неотмодерированных паттернов: {st.session_state.remaining_patterns_count}")
+        st.caption(f"Осталось неотмодерированных паттернов: {format_number_with_spaces(st.session_state.remaining_patterns_count)}")
+        st.write(f"id: {pattern['pattern_text']}")
+        st.write(f"Общая частотность: {format_number_with_spaces(pattern['total_frequency'])}")
+        st.write(f"Общее количество фраз: {format_number_with_spaces(pattern['total_quantity'])}")
 
         st.markdown("---")
         st.subheader("Ваша модерация")

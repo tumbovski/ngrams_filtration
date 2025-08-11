@@ -65,7 +65,10 @@ def make_mutable(obj):
     return obj
 
 def format_number_with_spaces(number):
-    return f"{number:,.2f}".replace(",", " ")
+    if number == int(number):
+        return f"{int(number):,}".replace(",", " ")
+    else:
+        return f"{number:,.2f}".replace(",", " ")
 
 # --- Кэшируемые функции ---
 @st.cache_resource(ttl=3603)
@@ -94,7 +97,10 @@ def make_mutable(obj):
     return obj
 
 def format_number_with_spaces(number):
-    return f"{number:,.2f}".replace(",", " ")
+    if number == int(number):
+        return f"{int(number):,}".replace(",", " ")
+    else:
+        return f"{number:,.2f}".replace(",", " ")
 
 # --- Кэшируемые функции ---
 @st.cache_data(ttl=3603)
@@ -414,7 +420,7 @@ def save_set_dialog():
 
 @st.dialog("Загрузить набор фильтров")
 def load_set_dialog():
-    saved_names = cached_load_filter_set_names()
+    saved_names = sorted(cached_load_filter_set_names())
     selected_name = st.selectbox("Выберите набор", ["-- Выберите --"] + saved_names)
     load_btn_col, del_btn_col = st.columns(2)
     if load_btn_col.button("Загрузить"):
@@ -443,31 +449,30 @@ main_col1, main_col2 = st.columns([2, 1.5])
 
 with main_col1:
     st.subheader("Параметры фильтрации")
-    
-    st.markdown("**Длина фразы (токенов) / Заполнение по шаблону:**")
-    top_row_cols = st.columns([2, 1, 1, 1])
 
-    with top_row_cols[0]:
+    # Row 1: Length, Min Freq, Min Qty
+    row1_cols = st.columns([2, 1, 1])
+    with row1_cols[0]:
         st.multiselect(
             "Длина фразы (токенов)",
             options=cached_get_all_unique_lengths(),
             default=st.session_state.selected_lengths,
             key="selected_lengths_widget",
             on_change=handle_length_change,
-            label_visibility="collapsed" # Скрываем метку
+            label_visibility="visible"
         )
-
-    min_freq_col, min_qty_col = st.columns(2)
-    with min_freq_col:
+    with row1_cols[1]:
         st.number_input("Мин. частотность (млн)", min_value=0.0, value=st.session_state.min_frequency, step=0.001, key="min_frequency_widget", on_change=lambda: setattr(st.session_state, 'min_frequency', st.session_state.min_frequency_widget))
-    with min_qty_col:
+    with row1_cols[2]:
         st.number_input("Мин. количество фраз", min_value=0, value=st.session_state.min_quantity, step=1, key="min_quantity_widget", on_change=lambda: setattr(st.session_state, 'min_quantity', st.session_state.min_quantity_widget))
 
-    with top_row_cols[1]:
+    # Row 2: DEP, POS, TAG buttons
+    row2_cols = st.columns(3)
+    with row2_cols[0]:
         st.button("DEP", use_container_width=True, on_click=fill_sequence_dialog, args=("dep",))
-    with top_row_cols[2]:
+    with row2_cols[1]:
         st.button("POS", use_container_width=True, on_click=fill_sequence_dialog, args=("pos",))
-    with top_row_cols[3]:
+    with row2_cols[2]:
         st.button("TAG", use_container_width=True, on_click=fill_sequence_dialog, args=("tag",))
 
     st.markdown("---")
@@ -642,7 +647,9 @@ if st.session_state.current_filters_hash != current_filters_hash:
 
 with main_col2:
     if st.session_state.results:
-        st.markdown(f"### Результаты <small>({format_number_with_spaces(len(st.session_state.results))})</small>", unsafe_allow_html=True)
+        total_frequency = sum(res[1] for res in st.session_state.results)
+        total_quantity = len(st.session_state.results)
+        st.markdown(f"### Результаты <small>(F: {format_number_with_spaces(total_frequency)}, Q: {format_number_with_spaces(total_quantity)})</small>", unsafe_allow_html=True)
     else:
         st.subheader("Результаты")
 

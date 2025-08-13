@@ -420,7 +420,7 @@ def save_set_dialog():
 
 @st.dialog("Загрузить набор фильтров")
 def load_set_dialog():
-    saved_names = sorted(cached_load_filter_set_names())
+    saved_names = sorted(cached_load_filter_set_names(), key=str.lower)
     selected_name = st.selectbox("Выберите набор", ["-- Выберите --"] + saved_names)
     load_btn_col, del_btn_col = st.columns(2)
     if load_btn_col.button("Загрузить"):

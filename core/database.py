@@ -64,6 +64,8 @@ def get_user_by_login(conn, login):
             return None
     except Exception as e:
         print(f"Ошибка при получении пользователя по логину: {e}")
+        if conn:
+            conn.rollback() # Add rollback here
         return None
 
 def get_user_by_id(conn, user_id):
@@ -586,6 +588,65 @@ def save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
             return True
     except Exception as e:
         print(f"Ошибка при сохранении записи модерации: {e}")
+        conn.rollback()
+        return False
+
+def get_moderation_history(conn, user_id):
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT
+                    mp.id,
+                    up.pattern_text,
+                    mp.rating,
+                    mp.comment,
+                    mp.tag,
+                    mp.pattern_id -- Added pattern_id
+                FROM
+                    moderation_patterns mp
+                JOIN
+                    unique_patterns up ON mp.pattern_id = up.id
+                WHERE
+                    mp.user_id = %s
+                ORDER BY
+                    mp.id DESC; -- Using mp.id for ordering as created_at does not exist
+            """
+            cur.execute(query, (user_id,))
+            records = cur.fetchall()
+            return [{
+                "id": row[0],
+                "pattern_text": row[1],
+                "rating": row[2],
+                "comment": row[3],
+                "tag": row[4],
+                "pattern_id": row[5] # Added pattern_id
+            } for row in records]
+    except Exception as e:
+        print(f"Ошибка при получении истории модераций: {e}")
+        if conn:
+            conn.rollback() # Add rollback here
+        return []
+
+def update_moderation_entry(conn, entry_id, new_rating, new_comment, new_tag):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            # Get pattern_id before updating
+            cur.execute("SELECT pattern_id FROM moderation_patterns WHERE id = %s;", (entry_id,))
+            pattern_id = cur.fetchone()[0]
+
+            cur.execute(
+                "UPDATE moderation_patterns SET rating = %s, comment = %s, tag = %s WHERE id = %s;",
+                (new_rating, new_comment, new_tag, entry_id)
+            )
+            conn.commit()
+
+            # Re-process moderation submission for the pattern
+            process_moderation_submission(conn, pattern_id)
+            return True
+    except Exception as e:
+        print(f"Ошибка при обновлении записи модерации: {e}")
         conn.rollback()
         return False
 

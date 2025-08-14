@@ -92,20 +92,21 @@ if 'current_pattern_to_moderate' not in st.session_state or st.session_state.cur
     load_next_pattern()
 
 # Main layout with two columns
-ngrams_table_col, moderation_details_col = st.columns([1, 3])
+ngrams_table_col, moderation_details_col = st.columns([1, 2])
 
 with ngrams_table_col:
     if st.session_state.current_pattern_to_moderate:
         #st.subheader("Фразы, соответствующие паттерну")
         if st.session_state.get('current_ngrams'):
             df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Фраза", "Частотность (млн)"])
+            df_ngrams = df_ngrams[["Частотность (млн)", "Фраза"]] # Reorder columns
             st.dataframe(
                 df_ngrams, 
                 use_container_width=True, 
                 hide_index=True, 
                 height=600,
                 column_config={
-                    "Фраза": st.column_config.Column(width="small"),
+                    "Фраза": st.column_config.Column(width="large"),
                     "Частотность (млн)": st.column_config.Column(width="small"),
                 }
             )

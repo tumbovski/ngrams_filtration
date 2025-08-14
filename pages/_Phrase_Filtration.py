@@ -17,7 +17,8 @@ from core.database import (
     build_where_clauses,
     execute_query,
     get_frequent_sequences,
-    get_suggestion_data
+    get_suggestion_data,
+    get_pattern_by_id
 )
 
 # --- Управление состоянием ---
@@ -49,7 +50,7 @@ if not conn:
     st.error("Не удалось подключиться к базе данных. Проверьте настройки в .env файле и доступность сервера.")
     st.stop()
 
-# --- Хелперы для кэширования (ИСПРАВЛЕННЫЕ) ---
+# --- Хелперы для кэширования ---
 def make_hashable(obj):
     if isinstance(obj, dict):
         return frozenset((k, make_hashable(v)) for k, v in sorted(obj.items()))
@@ -71,95 +72,35 @@ def format_number_with_spaces(number):
         return f"{number:,.2f}".replace(",", " ")
 
 # --- Кэшируемые функции ---
-@st.cache_resource(ttl=3603)
-def init_connection():
-    return get_db_connection()
-
-conn = init_connection()
-
-if not conn:
-    st.error("Не удалось подключиться к базе данных. Проверьте настройки в .env файле и доступность сервера.")
-    st.stop()
-
-# --- Хелперы для кэширования (ИСПРАВЛЕННЫЕ) ---
-def make_hashable(obj):
-    if isinstance(obj, dict):
-        return frozenset((k, make_hashable(v)) for k, v in sorted(obj.items()))
-    if isinstance(obj, list):
-        return tuple(make_hashable(v) for v in obj)
-    return obj
-
-def make_mutable(obj):
-    if isinstance(obj, frozenset):
-        return {k: make_mutable(v) for k, v in obj}
-    if isinstance(obj, tuple):
-        return list(make_mutable(v) for v in obj)
-    return obj
-
-def format_number_with_spaces(number):
-    if number == int(number):
-        return f"{int(number):,}".replace(",", " ")
-    else:
-        return f"{number:,.2f}".replace(",", " ")
-
-# --- Кэшируемые функции ---
-@st.cache_data(ttl=3603)
+@st.cache_data(ttl=3600)
 def cached_get_all_unique_lengths():
     return get_all_unique_lengths(conn)
 
-@st.cache_data(ttl=3603)
+@st.cache_data(ttl=3600)
 def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity):
     all_blocks = make_mutable(blocks_tuple)
     selected_lengths = list(selected_lengths_tuple)
     return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity)
 
-@st.cache_data(ttl=3603)
+@st.cache_data(ttl=3600)
 def cached_load_filter_set_names():
     return load_filter_set_names(conn)
 
-@st.cache_data(ttl=3603)
+@st.cache_data(ttl=3600)
 def cached_load_block_names():
     return load_block_names(conn)
 
-@st.cache_data(ttl=3603)
+@st.cache_data(ttl=3600)
 def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple):
     mutable_filter_blocks = make_mutable(filter_blocks_tuple)
     mutable_selected_lengths = list(selected_lengths_tuple)
     return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
 
-@st.cache_data(ttl=3603)
+@st.cache_data(ttl=3600)
 def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_frequency, min_quantity):
     selected_lengths = list(selected_lengths_tuple)
     filter_blocks = make_mutable(filter_blocks_tuple)
     return get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity)
-
-@st.cache_data(ttl=3602)
-def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity):
-    all_blocks = make_mutable(blocks_tuple)
-    selected_lengths = list(selected_lengths_tuple)
-    return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity)
-
-@st.cache_data(ttl=3602)
-def cached_load_filter_set_names():
-    return load_filter_set_names(conn)
-
-@st.cache_data(ttl=3602)
-def cached_load_block_names():
-    return load_block_names(conn)
-
-@st.cache_data(ttl=3602)
-def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple):
-    mutable_filter_blocks = make_mutable(filter_blocks_tuple)
-    mutable_selected_lengths = list(selected_lengths_tuple)
-    return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
-
-@st.cache_data(ttl=3602)
-def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_frequency, min_quantity):
-    selected_lengths = list(selected_lengths_tuple)
-    filter_blocks = make_mutable(filter_blocks_tuple)
-    return get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity)
-
-
 
 # --- Функции-коллбэки и хендлеры ---
 def clear_caches():
@@ -215,7 +156,6 @@ def handle_type_change(block_id, rule_id):
                 if rule['id'] == rule_id and rule['type'] != new_type:
                     rule['type'] = new_type
                     rule['values'] = []
-                    # Сохраняем оператор при смене типа
                     rule['operator'] = rule.get('operator', 'include') 
                     clear_caches()
                     break
@@ -396,6 +336,46 @@ def fill_sequence_dialog(sequence_type):
     if st.button("Закрыть"):
         st.rerun()
 
+@st.dialog("Загрузить паттерн по ID")
+def load_pattern_by_id_dialog():
+    pattern_id = st.number_input("Введите ID паттерна", min_value=1, step=1, value=None)
+    if st.button("Загрузить паттерн"):
+        if pattern_id and pattern_id > 0:
+            pattern_data = get_pattern_by_id(conn, pattern_id)
+            if pattern_data:
+                pattern_text, phrase_length = pattern_data
+                parts = pattern_text.split('_')
+                
+                if len(parts) != phrase_length * 3:
+                    st.error(f"Ошибка разбора паттерна: ожидалось {phrase_length * 3} частей, получено {len(parts)}.")
+                    return
+
+                deps = parts[0:phrase_length]
+                poss = parts[phrase_length : 2 * phrase_length]
+                tags = parts[2 * phrase_length : 3 * phrase_length]
+
+                st.session_state.filter_blocks = []
+                st.session_state.selected_lengths = [phrase_length]
+
+                for i in range(phrase_length):
+                    st.session_state.filter_blocks.append({
+                        'id': str(uuid.uuid4()),
+                        'position': i,
+                        'rules': [
+                            {'id': str(uuid.uuid4()), 'type': 'dep', 'values': [deps[i]]},
+                            {'id': str(uuid.uuid4()), 'type': 'pos', 'values': [poss[i]]},
+                            {'id': str(uuid.uuid4()), 'type': 'tag', 'values': [tags[i]]}
+                        ]
+                    })
+                
+                clear_caches()
+                st.toast("Паттерн успешно загружен!", icon="✅")
+                st.rerun()
+            else:
+                st.error(f"Паттерн с ID {pattern_id} не найден.")
+        else:
+            st.warning("Введите корректный ID.")
+
 @st.dialog("Сгенерированный SQL-запрос")
 def show_sql_dialog():
     st.code(st.session_state.last_query, language='sql')
@@ -450,9 +430,13 @@ main_col1, main_col2 = st.columns([2, 1.5])
 with main_col1:
     st.subheader("Параметры фильтрации")
 
-    # Row 1: Length, Min Freq, Min Qty
-    row1_cols = st.columns([2, 1, 1])
+    # Row 1: Min Freq, Min Qty, Length
+    row1_cols = st.columns([1, 1, 2])
     with row1_cols[0]:
+        st.number_input("Мин. частотность (млн)", min_value=0.0, value=st.session_state.min_frequency, step=0.001, key="min_frequency_widget", on_change=lambda: setattr(st.session_state, 'min_frequency', st.session_state.min_frequency_widget))
+    with row1_cols[1]:
+        st.number_input("Мин. количество фраз", min_value=0, value=st.session_state.min_quantity, step=1, key="min_quantity_widget", on_change=lambda: setattr(st.session_state, 'min_quantity', st.session_state.min_quantity_widget))
+    with row1_cols[2]:
         st.multiselect(
             "Длина фразы (токенов)",
             options=cached_get_all_unique_lengths(),
@@ -461,19 +445,17 @@ with main_col1:
             on_change=handle_length_change,
             label_visibility="visible"
         )
-    with row1_cols[1]:
-        st.number_input("Мин. частотность (млн)", min_value=0.0, value=st.session_state.min_frequency, step=0.001, key="min_frequency_widget", on_change=lambda: setattr(st.session_state, 'min_frequency', st.session_state.min_frequency_widget))
-    with row1_cols[2]:
-        st.number_input("Мин. количество фраз", min_value=0, value=st.session_state.min_quantity, step=1, key="min_quantity_widget", on_change=lambda: setattr(st.session_state, 'min_quantity', st.session_state.min_quantity_widget))
 
-    # Row 2: DEP, POS, TAG buttons
-    row2_cols = st.columns(3)
+    # Row 2: DEP, POS, TAG, ID buttons
+    row2_cols = st.columns(4)
     with row2_cols[0]:
         st.button("DEP", use_container_width=True, on_click=fill_sequence_dialog, args=("dep",))
     with row2_cols[1]:
         st.button("POS", use_container_width=True, on_click=fill_sequence_dialog, args=("pos",))
     with row2_cols[2]:
         st.button("TAG", use_container_width=True, on_click=fill_sequence_dialog, args=("tag",))
+    with row2_cols[3]:
+        st.button("ID", use_container_width=True, on_click=load_pattern_by_id_dialog)
 
     st.markdown("---")
 
@@ -499,8 +481,6 @@ with main_col1:
                     manage_block_dialog(block_id)
                 btn_cols[1].button("Удалить", on_click=remove_block, args=(block_id,), key=f"rem_block_{block_id}", help="Удалить блок", use_container_width=True)
             
-            # st.markdown("--- ") # Removed as expander provides visual separation
-
             for rule in block['rules']:
                 rule_id = rule['id']
                 rule_cols = st.columns([1, 1, 3, 0.5])
@@ -550,7 +530,6 @@ with main_col1:
             with st.expander("Подсказки для фильтрации", expanded=True):
                 st.info("Нет доступных вариантов для дальнейшей фильтрации.")
         else:
-            # Reorganize data by type and then by position
             suggestions_by_type_and_pos = {'dep': {}, 'pos': {}, 'tag': {}, 'morph': {}}
             for position, suggestions in suggestion_data.items():
                 for s in suggestions:
@@ -581,9 +560,8 @@ with main_col1:
                         cols = st.columns(num_columns)
 
                         for i, position in enumerate(sorted_positions):
-                            with cols[i]:
+                            with cols[i % num_columns]:
                                 st.markdown(f"**Позиция {position + 1}**")
-                                # Suggestions for this type and position are already sorted by frequency from the DB
                                 for s in pos_dict[position]:
                                     is_checked = (position, s['type'], s['value']) in active_filters
                                     key = f"suggest_{position}_{s['type']}_{s['value']}"
@@ -598,7 +576,6 @@ with main_col1:
                                     )
     
     
-
 def _run_query():
     
     if not st.session_state.selected_lengths:
@@ -606,11 +583,9 @@ def _run_query():
         st.session_state.last_query = ""
         return
     
-    # Проверяем, есть ли активные правила в блоках фильтров
     has_active_filters = any(rule['values'] for block in st.session_state.filter_blocks for rule in block['rules'])
 
     if not st.session_state.filter_blocks or not has_active_filters:
-        # Если нет блоков или нет активных правил, показываем предупреждение и очищаем результаты
         st.session_state.results = []
         st.session_state.last_query = ""
         return
@@ -642,16 +617,11 @@ if st.session_state.current_filters_hash != current_filters_hash:
     st.session_state.current_filters_hash = current_filters_hash
     _run_query()
 
-        
-        
-
 with main_col2:
     if st.session_state.results:
         total_frequency = sum(res[1] for res in st.session_state.results)
         total_quantity = len(st.session_state.results)
-        st.markdown(f"### Результаты <small>(F: {format_number_with_spaces(total_frequency)}, Q: {format_number_with_spaces(total_quantity)})</small>", unsafe_allow_html=True)
-    else:
-        st.subheader("Результаты")
+        st.markdown(f"### <small>F: {format_number_with_spaces(total_frequency)}, Q: {format_number_with_spaces(total_quantity)}</small>", unsafe_allow_html=True)
 
     if st.session_state.results:
         swapped_results = [(res[1], res[0]) for res in st.session_state.results]
@@ -688,7 +658,6 @@ with main_col2:
                 num_columns = 7
                 sorted_positions = sorted(position_word_count.keys())
                 
-                # Создаем колонки динамически, чтобы избежать ошибок при малом количестве позиций
                 cols = st.columns(min(len(sorted_positions), num_columns))
 
                 for i, position in enumerate(sorted_positions):
@@ -699,8 +668,3 @@ with main_col2:
                         sorted_words = sorted(word_counts.items(), key=lambda item: item[1], reverse=True)
                         for word, count in sorted_words:
                             st.markdown(f"- {word} ({format_number_with_spaces(count)})")
-
-
-
-
-

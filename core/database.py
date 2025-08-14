@@ -580,6 +580,18 @@ def get_ngrams_by_pattern_text_for_population(conn, pattern_text):
         print(f"Ошибка при получении ngrams для заполнения: {e}")
         return []
 
+def get_pattern_by_id(conn, pattern_id):
+    """Получает pattern_text и phrase_length по ID паттерна."""
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pattern_text, phrase_length FROM unique_patterns WHERE id = %s", (pattern_id,))
+            res = cur.fetchone()
+            return res if res else None
+    except Exception as e:
+        print(f"Ошибка при получении паттерна по ID: {e}")
+        return None
+
 def save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
     if not conn: return False
     try:

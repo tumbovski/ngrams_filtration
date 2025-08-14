@@ -20,20 +20,32 @@ phrase_lengths_options = list(range(2, 13)) # 2 to 12
 
 # --- Session State Management ---
 st.session_state.setdefault('selected_phrase_length', phrase_lengths_options[0])
+st.session_state.setdefault('min_total_frequency', 0)
+st.session_state.setdefault('min_total_quantity', 0)
 st.session_state.setdefault('current_pattern_to_moderate', None)
 st.session_state.setdefault('remaining_patterns_count', 0)
 st.session_state.setdefault('current_ngrams', None)
 
 # --- Helper Functions ---
 def load_next_pattern():
+    """Загружает следующий паттерн с учетом всех фильтров."""
     if st.session_state.selected_phrase_length and st.session_state.user_id:
+        min_freq = st.session_state.get('min_total_frequency', 0)
+        min_qty = st.session_state.get('min_total_quantity', 0)
+        
         pattern = get_next_unmoderated_pattern(
-            conn, st.session_state.user_id, st.session_state.selected_phrase_length
+            conn, st.session_state.user_id, st.session_state.selected_phrase_length,
+            min_total_frequency=min_freq,
+            min_total_quantity=min_qty
         )
         st.session_state.current_pattern_to_moderate = pattern
+        
         st.session_state.remaining_patterns_count = count_unmoderated_patterns(
-            conn, st.session_state.user_id, st.session_state.selected_phrase_length
+            conn, st.session_state.user_id, st.session_state.selected_phrase_length,
+            min_total_frequency=min_freq,
+            min_total_quantity=min_qty
         )
+        
         if pattern:
             st.session_state.current_ngrams = get_examples_by_pattern_id(conn, pattern['id'])
         else:
@@ -43,17 +55,21 @@ def load_next_pattern():
         st.session_state.remaining_patterns_count = 0
         st.session_state.current_ngrams = None
 
+def apply_filters_and_reload():
+    """Применяет фильтры и перезагружает паттерн."""
+    st.session_state.min_total_frequency = st.session_state.min_freq_input
+    st.session_state.min_total_quantity = st.session_state.min_qty_input
+    load_next_pattern()
+
 def handle_phrase_length_change():
-    st.session_state.selected_phrase_length = st.session_state.phrase_length_selector # Update session state
-    st.session_state.current_pattern_to_moderate = None # Reset current pattern
-    st.session_state.current_ngrams = None # Reset ngrams
+    st.session_state.selected_phrase_length = st.session_state.phrase_length_selector
     load_next_pattern()
 
 def submit_moderation_action(pattern_id, user_id, rating, comment, tag):
     if save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
-        process_moderation_submission(conn, pattern_id) # Process final rating/tag/comment
+        process_moderation_submission(conn, pattern_id)
         st.success("Модерация успешно сохранена!")
-        load_next_pattern() # Load next pattern
+        load_next_pattern()
         st.rerun()
     else:
         st.error("Ошибка при сохранении модерации.")
@@ -71,32 +87,71 @@ def format_number_with_spaces(number):
 # --- Main UI ---
 st.title("Приоритет модерации паттернов")
 
-# Phrase Length Selection
-st.selectbox(
-    "Выберите длину паттерна для модерации:",
-    options=phrase_lengths_options,
-    key="phrase_length_selector",
-    on_change=handle_phrase_length_change,
-    index=phrase_lengths_options.index(st.session_state.selected_phrase_length) if st.session_state.selected_phrase_length in phrase_lengths_options else 0
-)
-
 # Load initial pattern if not already loaded
-if st.session_state.current_pattern_to_moderate is None:
+if 'current_pattern_to_moderate' not in st.session_state or st.session_state.current_pattern_to_moderate is None:
     load_next_pattern()
 
 # Main layout with two columns
-moderation_details_col, ngrams_table_col = st.columns([2, 1])
+ngrams_table_col, moderation_details_col = st.columns([1, 3])
+
+with ngrams_table_col:
+    if st.session_state.current_pattern_to_moderate:
+        #st.subheader("Фразы, соответствующие паттерну")
+        if st.session_state.get('current_ngrams'):
+            df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Фраза", "Частотность (млн)"])
+            st.dataframe(
+                df_ngrams, 
+                use_container_width=True, 
+                hide_index=True, 
+                height=600,
+                column_config={
+                    "Фраза": st.column_config.Column(width="small"),
+                    "Частотность (млн)": st.column_config.Column(width="small"),
+                }
+            )
+        else:
+            # This might happen if the examples are not populated yet for this pattern
+            st.warning("Примеры фраз для этого паттерна не найдены в кэше `pattern_examples`.")
 
 with moderation_details_col:
+    with st.expander("Показать/скрыть фильтры"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.selectbox(
+                "Длина паттерна:",
+                options=phrase_lengths_options,
+                key="phrase_length_selector",
+                on_change=handle_phrase_length_change,
+                index=phrase_lengths_options.index(st.session_state.selected_phrase_length) if st.session_state.selected_phrase_length in phrase_lengths_options else 0
+            )
+        with col2:
+            st.number_input(
+                "Минимальная суммарная частотность:",
+                min_value=0,
+                step=10,
+                key="min_freq_input",
+                value=st.session_state.min_total_frequency
+            )
+        with col3:
+            st.number_input(
+                "Минимальное количество фраз:",
+                min_value=0,
+                step=1,
+                key="min_qty_input",
+                value=st.session_state.min_total_quantity
+            )
+        
+        if st.button("Применить фильтры", use_container_width=True):
+            apply_filters_and_reload()
+            st.rerun()
+
     if st.session_state.current_pattern_to_moderate:
         pattern = st.session_state.current_pattern_to_moderate
-        st.caption(f"Осталось неотмодерированных паттернов: {format_number_with_spaces(st.session_state.remaining_patterns_count)}")
-        st.write(f"id: {pattern['pattern_text']}")
-        st.write(f"Общая частотность: {format_number_with_spaces(pattern['total_frequency'])}")
-        st.write(f"Общее количество фраз: {format_number_with_spaces(pattern['total_quantity'])}")
+        st.caption(f"Осталось: {format_number_with_spaces(st.session_state.remaining_patterns_count)}")
+        st.write(f"**Паттерн:** `{pattern['pattern_text']}`")
+        st.markdown(f"**ID:** {pattern['id']} | **F:** {format_number_with_spaces(pattern['total_frequency'])} | **Q:** {format_number_with_spaces(pattern['total_quantity'])}")
 
         st.markdown("---")
-        st.subheader("Ваша модерация")
         
         user_id = st.session_state.user_id
         if user_id is None:
@@ -106,17 +161,18 @@ with moderation_details_col:
             comment = st.text_area("Комментарий")
             tag = st.text_input("Тег/Тип")
 
-            if st.button("Готово"):
-                submit_moderation_action(pattern['id'], user_id, rating, comment, tag)
+            col1, col2 = st.columns([1,3])
+            with col1:
+                if st.button("Готово", use_container_width=True):
+                    submit_moderation_action(pattern['id'], user_id, rating, comment, tag)
+            with col2:
+                if st.button("Пропустить", use_container_width=True):
+                    load_next_pattern()
+                    st.rerun()
 
     else:
-        st.info("Выберите длину паттерна, чтобы начать модерацию.")
-
-with ngrams_table_col:
-    if st.session_state.current_pattern_to_moderate:
-        st.subheader("Фразы, соответствующие паттерну")
-        if st.session_state.get('current_ngrams'):
-            df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Фраза", "Частотность (млн)"])
-            st.dataframe(df_ngrams, use_container_width=True, hide_index=True, height=600)
-        else:
-            st.info("Нет фраз, соответствующих этому паттерну.")
+        st.info("Паттерны, соответствующие заданным фильтрам, не найдены или уже отмодерированы.")
+        st.info("Попробуйте изменить фильтры или выбрать другую длину паттерна.")
+        if st.button("Проверить снова"):
+            load_next_pattern()
+            st.rerun()

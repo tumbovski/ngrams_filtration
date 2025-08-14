@@ -472,7 +472,7 @@ def execute_query(conn, query):
         return []
 
 # --- Функции для модерации паттернов ---
-def get_next_unmoderated_pattern(conn, user_id, phrase_length):
+def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0):
     if not conn: return None
     try:
         with conn.cursor() as cur:
@@ -486,11 +486,13 @@ def get_next_unmoderated_pattern(conn, user_id, phrase_length):
                     moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %s
                 WHERE
                     up.phrase_length = %s AND mp.id IS NULL
+                    AND up.total_frequency >= %s
+                    AND up.total_quantity >= %s
                 ORDER BY
                     up.total_frequency DESC
                 LIMIT 1;
             """
-            cur.execute(query, (user_id, phrase_length))
+            cur.execute(query, (user_id, phrase_length, min_total_frequency, min_total_quantity))
             row = cur.fetchone()
             if row:
                 return {
@@ -508,7 +510,7 @@ def get_next_unmoderated_pattern(conn, user_id, phrase_length):
         print(f"Ошибка при получении следующего неотмодерированного паттерна: {e}")
         return None
 
-def count_unmoderated_patterns(conn, user_id, phrase_length):
+def count_unmoderated_patterns(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0):
     if not conn: return 0
     try:
         with conn.cursor() as cur:
@@ -520,9 +522,11 @@ def count_unmoderated_patterns(conn, user_id, phrase_length):
                 LEFT JOIN
                     moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %s
                 WHERE
-                    up.phrase_length = %s AND mp.id IS NULL;
+                    up.phrase_length = %s AND mp.id IS NULL
+                    AND up.total_frequency >= %s
+                    AND up.total_quantity >= %s;
             """
-            cur.execute(query, (user_id, phrase_length))
+            cur.execute(query, (user_id, phrase_length, min_total_frequency, min_total_quantity))
             count = cur.fetchone()[0]
             return count
     except Exception as e:

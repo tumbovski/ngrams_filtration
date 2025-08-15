@@ -472,11 +472,17 @@ def execute_query(conn, query):
         return []
 
 # --- Функции для модерации паттернов ---
-def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0):
+def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0, pattern_id_to_exclude=None):
     if not conn: return None
     try:
         with conn.cursor() as cur:
-            query = """
+            exclude_clause = ""
+            params = [user_id, phrase_length, min_total_frequency, min_total_quantity]
+            if pattern_id_to_exclude is not None:
+                exclude_clause = "AND up.id != %s"
+                params.append(pattern_id_to_exclude)
+
+            query = f"""
                 SELECT
                     up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
                     up.final_rating, up.final_tag, up.final_comment
@@ -488,11 +494,12 @@ def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequen
                     up.phrase_length = %s AND mp.id IS NULL
                     AND up.total_frequency >= %s
                     AND up.total_quantity >= %s
+                    {exclude_clause}
                 ORDER BY
                     up.total_frequency DESC
                 LIMIT 1;
             """
-            cur.execute(query, (user_id, phrase_length, min_total_frequency, min_total_quantity))
+            cur.execute(query, tuple(params))
             row = cur.fetchone()
             if row:
                 return {
@@ -618,7 +625,8 @@ def get_moderation_history(conn, user_id):
                     mp.rating,
                     mp.comment,
                     mp.tag,
-                    mp.pattern_id -- Added pattern_id
+                    mp.pattern_id,
+                    mp.submitted_at
                 FROM
                     moderation_patterns mp
                 JOIN
@@ -626,7 +634,7 @@ def get_moderation_history(conn, user_id):
                 WHERE
                     mp.user_id = %s
                 ORDER BY
-                    mp.id DESC; -- Using mp.id for ordering as created_at does not exist
+                    mp.submitted_at DESC;
             """
             cur.execute(query, (user_id,))
             records = cur.fetchall()
@@ -636,7 +644,8 @@ def get_moderation_history(conn, user_id):
                 "rating": row[2],
                 "comment": row[3],
                 "tag": row[4],
-                "pattern_id": row[5] # Added pattern_id
+                "pattern_id": row[5],
+                "submitted_at": row[6]
             } for row in records]
     except Exception as e:
         print(f"Ошибка при получении истории модераций: {e}")
@@ -715,3 +724,27 @@ def process_moderation_submission(conn, pattern_id):
     except Exception as e:
         print(f"Ошибка при обработке отправки модерации: {e}")
         conn.rollback()
+
+def delete_moderation_record(conn, entry_id):
+    """Удаляет запись модерации и возвращает ID связанного паттерна."""
+    if not conn: return False, None
+    try:
+        with conn.cursor() as cur:
+            # Сначала получаем pattern_id, чтобы вернуть его для переобработки
+            cur.execute("SELECT pattern_id FROM moderation_patterns WHERE id = %s;", (entry_id,))
+            result = cur.fetchone()
+            if not result:
+                return False, None # Запись не найдена
+
+            pattern_id = result[0]
+
+            # Теперь удаляем запись
+            cur.execute("DELETE FROM moderation_patterns WHERE id = %s;", (entry_id,))
+            conn.commit()
+            
+            # Возвращаем True и pattern_id для переобработки
+            return True, pattern_id
+    except Exception as e:
+        print(f"Ошибка при удалении записи модерации: {e}")
+        conn.rollback()
+        return False, None

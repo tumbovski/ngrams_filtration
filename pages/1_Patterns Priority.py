@@ -25,18 +25,29 @@ st.session_state.setdefault('min_total_quantity', 0)
 st.session_state.setdefault('current_pattern_to_moderate', None)
 st.session_state.setdefault('remaining_patterns_count', 0)
 st.session_state.setdefault('current_ngrams', None)
+st.session_state.setdefault('moderation_rating', None) # No default rating
+st.session_state.setdefault('moderation_comment', '')
+st.session_state.setdefault('moderation_tag', '')
 
 # --- Helper Functions ---
-def load_next_pattern():
-    """Загружает следующий паттерн с учетом всех фильтров."""
+def load_next_pattern(skipped_pattern_id=None):
+    """Загружает следующий паттерн, опционально исключая только что пропущенный."""
+    # Сбрасываем поля перед загрузкой нового паттерна
+    st.session_state.moderation_rating = None
+    st.session_state.moderation_comment = ''
+    st.session_state.moderation_tag = ''
+    
     if st.session_state.selected_phrase_length and st.session_state.user_id:
         min_freq = st.session_state.get('min_total_frequency', 0)
         min_qty = st.session_state.get('min_total_quantity', 0)
         
         pattern = get_next_unmoderated_pattern(
-            conn, st.session_state.user_id, st.session_state.selected_phrase_length,
+            conn, 
+            st.session_state.user_id, 
+            st.session_state.selected_phrase_length,
             min_total_frequency=min_freq,
-            min_total_quantity=min_qty
+            min_total_quantity=min_qty,
+            pattern_id_to_exclude=skipped_pattern_id # Передаем ID для исключения
         )
         st.session_state.current_pattern_to_moderate = pattern
         
@@ -65,12 +76,21 @@ def handle_phrase_length_change():
     st.session_state.selected_phrase_length = st.session_state.phrase_length_selector
     load_next_pattern()
 
-def submit_moderation_action(pattern_id, user_id, rating, comment, tag):
+def on_rating_change():
+    """Callback, который срабатывает при выборе оценки."""
+    rating = st.session_state.moderation_rating
+    if rating is None:
+        return
+
+    comment = st.session_state.moderation_comment
+    tag = st.session_state.moderation_tag
+    pattern_id = st.session_state.current_pattern_to_moderate['id']
+    user_id = st.session_state.user_id
+
     if save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
         process_moderation_submission(conn, pattern_id)
-        st.success("Модерация успешно сохранена!")
+        st.toast(f"Оценка '{rating}' принята!", icon="✅")
         load_next_pattern()
-        st.rerun()
     else:
         st.error("Ошибка при сохранении модерации.")
 
@@ -91,28 +111,33 @@ st.title("Приоритет модерации паттернов")
 if 'current_pattern_to_moderate' not in st.session_state or st.session_state.current_pattern_to_moderate is None:
     load_next_pattern()
 
+# Define pattern here, so it's available to both columns
+pattern = st.session_state.current_pattern_to_moderate
+
 # Main layout with two columns
 ngrams_table_col, moderation_details_col = st.columns([1, 2])
 
 with ngrams_table_col:
-    if st.session_state.current_pattern_to_moderate:
-        #st.subheader("Фразы, соответствующие паттерну")
+    if pattern:
         if st.session_state.get('current_ngrams'):
-            df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Фраза", "Частотность (млн)"])
+            df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Частотность (млн)", "Фраза"])
             df_ngrams = df_ngrams[["Частотность (млн)", "Фраза"]] # Reorder columns
             st.dataframe(
                 df_ngrams, 
                 use_container_width=True, 
                 hide_index=True, 
-                height=600,
+                height=654,
                 column_config={
-                    "Фраза": st.column_config.Column(width="large"),
+                    "Фраза": st.column_config.Column(width="small"),
                     "Частотность (млн)": st.column_config.Column(width="small"),
-                }
+                },
+                key=f"ngrams_table_{pattern['id']}"
             )
         else:
-            # This might happen if the examples are not populated yet for this pattern
-            st.warning("Примеры фраз для этого паттерна не найдены в кэше `pattern_examples`.")
+            st.info("Нет фраз, соответствующих этому паттерну.")
+    else:
+        st.info("Выберите длину паттерна, чтобы начать модерацию.")
+
 
 with moderation_details_col:
     with st.expander("Показать/скрыть фильтры"):
@@ -144,10 +169,8 @@ with moderation_details_col:
         
         if st.button("Применить фильтры", use_container_width=True):
             apply_filters_and_reload()
-            st.rerun()
 
-    if st.session_state.current_pattern_to_moderate:
-        pattern = st.session_state.current_pattern_to_moderate
+    if pattern:
         st.caption(f"Осталось: {format_number_with_spaces(st.session_state.remaining_patterns_count)}")
         st.write(f"**Паттерн:** `{pattern['pattern_text']}`")
         st.markdown(f"**ID:** {pattern['id']} | **F:** {format_number_with_spaces(pattern['total_frequency'])} | **Q:** {format_number_with_spaces(pattern['total_quantity'])}")
@@ -158,22 +181,25 @@ with moderation_details_col:
         if user_id is None:
             st.warning("Не удалось получить ID пользователя. Пожалуйста, войдите снова.")
         else:
-            rating = st.radio("Оценка", options=[1, 2, 3, 4, 5], index=2, horizontal=True)
-            comment = st.text_area("Комментарий")
-            tag = st.text_input("Тег/Тип")
-
-            col1, col2 = st.columns([1,3])
-            with col1:
-                if st.button("Готово", use_container_width=True):
-                    submit_moderation_action(pattern['id'], user_id, rating, comment, tag)
-            with col2:
-                if st.button("Пропустить", use_container_width=True):
-                    load_next_pattern()
-                    st.rerun()
+            st.text_area("Комментарий", key="moderation_comment")
+            st.text_input("Тег/Тип", key="moderation_tag")
+            
+            st.radio(
+                "Оценка", 
+                options=[1, 2, 3, 4, 5], 
+                horizontal=True, 
+                key="moderation_rating",
+                on_change=on_rating_change,
+                index=None # Убираем выбор по умолчанию
+            )
+            
+            st.markdown("---")
+            # Передаем ID текущего паттерна в callback кнопки "Пропустить"
+            st.button("Пропустить", use_container_width=True, on_click=load_next_pattern, args=(pattern['id'],))
 
     else:
         st.info("Паттерны, соответствующие заданным фильтрам, не найдены или уже отмодерированы.")
         st.info("Попробуйте изменить фильтры или выбрать другую длину паттерна.")
         if st.button("Проверить снова"):
             load_next_pattern()
-            st.rerun()
+

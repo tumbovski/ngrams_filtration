@@ -118,7 +118,6 @@ def add_block():
     new_block_id = str(uuid.uuid4())
     new_rule_id = str(uuid.uuid4())
     st.session_state.filter_blocks.append({'id': new_block_id, 'position': 0, 'rules': [{'id': new_rule_id, 'type': 'dep', 'values': [], 'operator': 'include'}]})
-    clear_caches()
 
 def remove_block(block_id):
     st.session_state.filter_blocks = [b for b in st.session_state.filter_blocks if b['id'] != block_id]
@@ -129,7 +128,6 @@ def add_rule(block_id):
         if block['id'] == block_id:
             block['rules'].append({'id': str(uuid.uuid4()), 'type': 'dep', 'values': [], 'operator': 'include'})
             break
-    clear_caches()
 
 def remove_rule(block_id, rule_id):
     for block in st.session_state.filter_blocks:
@@ -522,9 +520,21 @@ with main_col1:
     # --- Панель подсказок ---
     if st.session_state.selected_lengths:
         selected_lengths_tuple = tuple(st.session_state.selected_lengths)
-        filter_blocks_tuple = make_hashable(st.session_state.filter_blocks)
         
-        suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, st.session_state.min_frequency, st.session_state.min_quantity)
+        # Создаем версию блоков фильтров, которая включает только правила со значениями.
+        # Это будет использоваться в качестве ключа кэша для данных подсказок.
+        active_filter_blocks = []
+        for block in st.session_state.filter_blocks:
+            active_rules = [rule for rule in block['rules'] if rule['values']]
+            if active_rules:
+                # Нам нужно сохранить структуру блока, но только с активными правилами
+                active_block = block.copy()
+                active_block['rules'] = active_rules
+                active_filter_blocks.append(active_block)
+
+        filter_blocks_tuple_for_suggestions = make_hashable(active_filter_blocks)
+        
+        suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple_for_suggestions, st.session_state.min_frequency, st.session_state.min_quantity)
 
         if not suggestion_data:
             with st.expander("Подсказки для фильтрации", expanded=True):

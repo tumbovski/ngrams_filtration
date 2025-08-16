@@ -28,6 +28,7 @@ st.session_state.setdefault('current_ngrams', None)
 st.session_state.setdefault('moderation_rating', None) # No default rating
 st.session_state.setdefault('moderation_comment', '')
 st.session_state.setdefault('moderation_tag', '')
+st.session_state.setdefault('rating_submitted', False)
 
 # --- Helper Functions ---
 def load_next_pattern(skipped_pattern_id=None):
@@ -114,13 +115,19 @@ if 'current_pattern_to_moderate' not in st.session_state or st.session_state.cur
 # Define pattern here, so it's available to both columns
 pattern = st.session_state.current_pattern_to_moderate
 
+# Process rating submission if flag is set
+if st.session_state.get('rating_submitted'):
+    if pattern:
+        on_rating_change()
+    st.session_state.rating_submitted = False # Reset flag
+
 # Main layout with two columns
 ngrams_table_col, moderation_details_col = st.columns([1, 2])
 
 with ngrams_table_col:
     if pattern:
         if st.session_state.get('current_ngrams'):
-            df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Частотность (млн)", "Фраза"])
+            df_ngrams = pd.DataFrame(st.session_state.current_ngrams, columns=["Фраза", "Частотность (млн)"])
             df_ngrams = df_ngrams[["Частотность (млн)", "Фраза"]] # Reorder columns
             st.dataframe(
                 df_ngrams, 
@@ -184,14 +191,15 @@ with moderation_details_col:
             st.text_area("Комментарий", key="moderation_comment")
             st.text_input("Тег/Тип", key="moderation_tag")
             
-            st.radio(
-                "Оценка", 
-                options=[1, 2, 3, 4, 5], 
-                horizontal=True, 
-                key="moderation_rating",
-                on_change=on_rating_change,
-                index=None # Убираем выбор по умолчанию
-            )
+            st.write("Оценка:")
+            rating_cols = st.columns(5)
+            ratings = [1, 2, 3, 4, 5]
+            for i, rating in enumerate(ratings):
+                with rating_cols[i]:
+                    if st.button(label=str(rating), key=f"rating_button_{rating}", use_container_width=True):
+                        st.session_state.moderation_rating = rating
+                        st.session_state.rating_submitted = True
+                        st.rerun()
             
             st.markdown("---")
             # Передаем ID текущего паттерна в callback кнопки "Пропустить"

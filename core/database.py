@@ -3,6 +3,7 @@ import json
 import os
 from dotenv import load_dotenv
 import bcrypt
+import uuid
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -159,22 +160,66 @@ def get_all_unique_lengths(conn):
         print(f"Ошибка при получении длин: {e}")
         return []
 
-def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency=0.0, min_quantity=0):
+def create_temp_table_for_session(conn, lengths):
+    """
+    Создает временную таблицу для сессии пользователя, содержащую n-граммы
+    выбранных длин для ускорения последующих запросов.
+    """
+    if not conn or not lengths:
+        return None
+
+    table_name = f"temp_ngrams_{uuid.uuid4().hex}"
+    
+    try:
+        with conn.cursor() as cur:
+            # Создаем временную таблицу с данными
+            cur.execute(
+                f"""
+                CREATE TEMP TABLE {table_name} AS
+                SELECT * FROM ngrams WHERE len = ANY(%s);
+                """,
+                (lengths,)
+            )
+            
+            # Добавляем индексы для ускорения запросов
+            max_len = max(lengths) if lengths else 0
+            for i in range(max_len):
+                # Для каждой позиции создаем покрывающий индекс, включающий частотность и id,
+                # чтобы разрешить сканирование только по индексу (Index-Only Scans).
+                cur.execute(f"CREATE INDEX ON {table_name} ((deps->>{i})) INCLUDE (freq_mln, id);")
+                cur.execute(f"CREATE INDEX ON {table_name} ((pos->>{i})) INCLUDE (freq_mln, id);")
+                cur.execute(f"CREATE INDEX ON {table_name} ((tags->>{i})) INCLUDE (freq_mln, id);")
+
+            # GIN-индекс по-прежнему лучше всего подходит для сложной структуры 'morph'
+            cur.execute(f"CREATE INDEX ON {table_name} USING gin(morph);")
+            cur.execute(f"CREATE INDEX ON {table_name} (len);")
+            
+            # Собираем статистику для оптимизатора запросов
+            cur.execute(f"ANALYZE {table_name};")
+            
+            conn.commit()
+            return table_name
+    except Exception as e:
+        print(f"Ошибка при создании временной таблицы: {e}")
+        conn.rollback()
+        return None
+
+def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency=0.0, min_quantity=0, table_name="ngrams"):
     if not conn: return []
     db_column_name = COLUMN_MAPPING.get(rule_type, rule_type)
-    preceding_where_clauses = build_where_clauses(all_blocks, block_id_to_exclude, rule_id_to_exclude)
+    preceding_where_clauses = build_where_clauses(all_blocks, table_name, block_id_to_exclude, rule_id_to_exclude)
     
-    if selected_lengths:
+    if table_name == "ngrams" and selected_lengths:
         preceding_where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
     
     preceding_where_str = " AND " + " AND ".join(preceding_where_clauses) if preceding_where_clauses else ""
-    base_where = f"jsonb_array_length(ngrams.{db_column_name}) > {position}"
+    base_where = f"jsonb_array_length({table_name}.{db_column_name}) > {position}"
 
-    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM ngrams WHERE {base_where} {preceding_where_str} GROUP BY 1 HAVING SUM(freq_mln) >= %s AND COUNT(id) >= %s ORDER BY 2 DESC;"
+    query_template = f"SELECT {{field}}, SUM(freq_mln), COUNT(id) FROM {table_name} WHERE {{base_where}} {{preceding_where_str}} GROUP BY 1 HAVING SUM(freq_mln) >= %s AND COUNT(id) >= %s ORDER BY 2 DESC;"
     if db_column_name == 'morph':
-        field = f"jsonb_array_elements_text(ngrams.morph->{position})"
+        field = f"jsonb_array_elements_text({table_name}.morph->{position})"
     else:
-        field = f"ngrams.{db_column_name}->>{position}"
+        field = f"{table_name}.{db_column_name}->>{position}"
     
     query = query_template.format(field=field, base_where=base_where, preceding_where_str=preceding_where_str)
     
@@ -186,7 +231,7 @@ def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_
         print(f"Ошибка при получении уникальных значений: {e}")
         return []
 
-def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, selected_lengths, limit=100):
+def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, selected_lengths, limit=100, table_name="ngrams"):
     if not conn: return []
     db_column_name = COLUMN_MAPPING.get(sequence_type, sequence_type)
     
@@ -196,19 +241,19 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
     select_parts = []
     group_by_parts = []
     for i in range(phrase_length):
-        select_parts.append(f"ngrams.{db_column_name}->>{i}")
-        group_by_parts.append(f"ngrams.{db_column_name}->>{i}")
+        select_parts.append(f"{table_name}.{db_column_name}->>{i}")
+        group_by_parts.append(f"{table_name}.{db_column_name}->>{i}")
     
     select_clause = ", ".join(select_parts)
     group_by_clause = ", ".join(group_by_parts)
 
-    where_clauses = build_where_clauses(filter_blocks)
-    if selected_lengths:
+    where_clauses = build_where_clauses(filter_blocks, table_name)
+    if table_name == "ngrams" and selected_lengths:
         where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
 
     # Добавляем условие на длину фразы для текущего запроса
     where_clauses.append(f"len = {phrase_length}")
-    where_clauses.append(f"jsonb_array_length(ngrams.{db_column_name}) = {phrase_length}")
+    where_clauses.append(f"jsonb_array_length({table_name}.{db_column_name}) = {phrase_length}")
 
     full_where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
 
@@ -218,7 +263,7 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
             SUM(freq_mln) as total_frequency,
             COUNT(*) as quantity
         FROM
-            ngrams
+            {table_name}
         WHERE
             {full_where_clause}
         GROUP BY
@@ -237,7 +282,7 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
         print(f"Ошибка при получении частых последовательностей {sequence_type} для длины {phrase_length}: {e}")
         return []
 
-def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0, min_quantity=0):
+def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0, min_quantity=0, table_name="ngrams"):
     """
     Получает данные для панели подсказок: доступные варианты фильтрации
     для каждой позиции, отсортированные по частотности.
@@ -249,8 +294,8 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0
     if max_len == 0:
         return {}
 
-    base_where_clauses = build_where_clauses(filter_blocks)
-    if selected_lengths:
+    base_where_clauses = build_where_clauses(filter_blocks, table_name)
+    if table_name == "ngrams": # Only add length filter if using main table
         base_where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
     
     base_where_str = " AND " + " AND ".join(base_where_clauses) if base_where_clauses else ""
@@ -274,13 +319,13 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0
                         SELECT 
                             {i} as position, 
                             '{rule_type}' as type, 
-                            jsonb_array_elements_text(ngrams.{db_column}->{i}) as value, 
+                            jsonb_array_elements_text({table_name}.{db_column}->{i}) as value, 
                             SUM(freq_mln) as frequency,
                             COUNT(id) as quantity
-                        FROM ngrams
+                        FROM {table_name}
                         WHERE 
-                            jsonb_array_length(ngrams.{db_column}) > {i} AND
-                            jsonb_typeof(ngrams.{db_column}->{i}) = 'array'
+                            jsonb_array_length({table_name}.{db_column}) > {i} AND
+                            jsonb_typeof({table_name}.{db_column}->{i}) = 'array'
                             {base_where_str}
                         GROUP BY 1, 2, 3
                         HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d}
@@ -291,12 +336,12 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0
                         SELECT 
                             {i} as position, 
                             '{rule_type}' as type, 
-                            ngrams.{db_column}->>{i} as value, 
+                            {table_name}.{db_column}->>{i} as value, 
                             SUM(freq_mln) as frequency,
                             COUNT(id) as quantity
-                        FROM ngrams
+                        FROM {table_name}
                         WHERE 
-                            jsonb_array_length(ngrams.{db_column}) > {i}
+                            jsonb_array_length({table_name}.{db_column}) > {i}
                             {base_where_str}
                         GROUP BY 1, 2, 3
                         HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d}
@@ -332,6 +377,10 @@ def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0
                 suggestion_data[pos] = sorted(list(unique_items), key=lambda x: x['freq'], reverse=True)
 
             return suggestion_data
+    except Exception as e:
+        print(f"Ошибка при получении данных для подсказок: {e}")
+        conn.rollback()
+        return {}
     except Exception as e:
         print(f"Ошибка при получении данных для подсказок: {e}")
         conn.rollback()
@@ -432,7 +481,7 @@ def delete_block_by_name(conn, name):
         return False
 
 # --- Построение SQL ---
-def build_where_clauses(blocks, block_id_to_skip=None, rule_id_to_skip=None):
+def build_where_clauses(blocks, table_name="ngrams", block_id_to_skip=None, rule_id_to_skip=None):
     where_clauses = []
     for block in blocks:
         if block['id'] == block_id_to_skip and rule_id_to_skip is None: continue
@@ -445,17 +494,17 @@ def build_where_clauses(blocks, block_id_to_skip=None, rule_id_to_skip=None):
             values = rule['values']
             operator = rule.get('operator', 'include') # По умолчанию 'include'
             if db_col_type == 'morph':
-                conditions = ' OR '.join([f"ngrams.morph->{position} @> '{json.dumps(v)}'::jsonb" for v in values])
+                conditions = ' OR '.join([f"{table_name}.morph->{position} @> '{json.dumps(v)}'::jsonb" for v in values])
                 if operator == 'exclude':
-                    block_rules.append(f"(jsonb_array_length(ngrams.morph) > {position} AND NOT ({conditions}))")
+                    block_rules.append(f"(jsonb_array_length({table_name}.morph) > {position} AND NOT ({conditions}))")
                 else:
-                    block_rules.append(f"(jsonb_array_length(ngrams.morph) > {position} AND ({conditions}))")
+                    block_rules.append(f"(jsonb_array_length({table_name}.morph) > {position} AND ({conditions}))")
             else:
                 vals_str = ", ".join([f"'{v}'" for v in values])
                 if operator == 'exclude':
-                    block_rules.append(f"(jsonb_array_length(ngrams.{db_col_type}) > {position} AND ngrams.{db_col_type}->>{position} NOT IN ({vals_str}))")
+                    block_rules.append(f"(jsonb_array_length({table_name}.{db_col_type}) > {position} AND {table_name}.{db_col_type}->>{position} NOT IN ({vals_str}))")
                 else:
-                    block_rules.append(f"(jsonb_array_length(ngrams.{db_col_type}) > {position} AND ngrams.{db_col_type}->>{position} IN ({vals_str}))")
+                    block_rules.append(f"(jsonb_array_length({table_name}.{db_col_type}) > {position} AND {table_name}.{db_col_type}->>{position} IN ({vals_str}))")
         if block_rules:
             where_clauses.append(f"({' AND '.join(block_rules)})")
     return where_clauses

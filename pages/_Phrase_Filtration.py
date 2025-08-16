@@ -18,7 +18,8 @@ from core.database import (
     execute_query,
     get_frequent_sequences,
     get_suggestion_data,
-    get_pattern_by_id
+    get_pattern_by_id,
+    create_temp_table_for_session
 )
 
 # --- Управление состоянием ---
@@ -38,6 +39,7 @@ if 'current_filters_hash' not in st.session_state: st.session_state.current_filt
 if 'show_word_analysis' not in st.session_state: st.session_state.show_word_analysis = False
 if 'min_frequency' not in st.session_state: st.session_state.min_frequency = 0.0
 if 'min_quantity' not in st.session_state: st.session_state.min_quantity = 0
+if 'temp_table_name' not in st.session_state: st.session_state.temp_table_name = None
 
 # --- Подключение к БД и кэширование ---
 @st.cache_resource
@@ -77,10 +79,10 @@ def cached_get_all_unique_lengths():
     return get_all_unique_lengths(conn)
 
 @st.cache_data(ttl=3600)
-def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity):
+def cached_get_unique_values_for_rule(position, rule_type, selected_lengths_tuple, blocks_tuple, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity, table_name="ngrams"):
     all_blocks = make_mutable(blocks_tuple)
     selected_lengths = list(selected_lengths_tuple)
-    return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity)
+    return get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity, table_name)
 
 @st.cache_data(ttl=3600)
 def cached_load_filter_set_names():
@@ -91,16 +93,16 @@ def cached_load_block_names():
     return load_block_names(conn)
 
 @st.cache_data(ttl=3600)
-def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple):
+def cached_get_frequent_sequences(sequence_type, phrase_length, filter_blocks_tuple, selected_lengths_tuple, table_name="ngrams"):
     mutable_filter_blocks = make_mutable(filter_blocks_tuple)
     mutable_selected_lengths = list(selected_lengths_tuple)
-    return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths)
+    return get_frequent_sequences(conn, sequence_type, phrase_length, mutable_filter_blocks, mutable_selected_lengths, table_name=table_name)
 
 @st.cache_data(ttl=3600)
-def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_frequency, min_quantity):
+def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_frequency, min_quantity, table_name="ngrams"):
     selected_lengths = list(selected_lengths_tuple)
     filter_blocks = make_mutable(filter_blocks_tuple)
-    return get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity)
+    return get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity, table_name)
 
 # --- Функции-коллбэки и хендлеры ---
 def clear_caches():
@@ -112,7 +114,19 @@ def handle_length_change():
     st.session_state.selected_lengths = st.session_state.selected_lengths_widget
     max_len = max(st.session_state.selected_lengths) if st.session_state.selected_lengths else 0
     st.session_state.filter_blocks = [b for b in st.session_state.filter_blocks if b['position'] < max_len]
+    
+    # Clear caches and temp table when lengths change
     clear_caches()
+    st.session_state.temp_table_name = None # Reset temp table
+
+    if st.session_state.selected_lengths:
+        with st.spinner("Создание временной таблицы для ускорения..."):
+            table_name = create_temp_table_for_session(conn, st.session_state.selected_lengths)
+            if table_name:
+                st.session_state.temp_table_name = table_name
+                st.toast("Временная таблица создана!", icon="✅")
+            else:
+                st.error("Не удалось создать временную таблицу.")
 
 def add_block():
     new_block_id = str(uuid.uuid4())
@@ -284,7 +298,8 @@ def fill_sequence_dialog(sequence_type):
     blocks_tuple = make_hashable(st.session_state.filter_blocks)
     selected_lengths_tuple = tuple(st.session_state.selected_lengths)
 
-    sequences_data = cached_get_frequent_sequences(sequence_type, phrase_length, blocks_tuple, selected_lengths_tuple)
+    table_to_use = st.session_state.get("temp_table_name") or "ngrams"
+    sequences_data = cached_get_frequent_sequences(sequence_type, phrase_length, blocks_tuple, selected_lengths_tuple, table_name=table_to_use)
     
     options = []
     for seq in sequences_data:
@@ -460,6 +475,8 @@ with main_col1:
     max_len = max(st.session_state.selected_lengths) if st.session_state.selected_lengths else 0
     pos_options = list(range(1, max_len + 1))
 
+    table_to_use = st.session_state.get("temp_table_name") or "ngrams"
+
     for block in st.session_state.filter_blocks:
         expander_title = f"Позиция {block['position'] + 1}"
         with st.expander(expander_title, expanded=True):
@@ -491,7 +508,7 @@ with main_col1:
                 
                 blocks_tuple = make_hashable(st.session_state.filter_blocks)
                 selected_lengths_tuple = tuple(st.session_state.selected_lengths)
-                unique_vals = cached_get_unique_values_for_rule(block['position'], rule['type'], selected_lengths_tuple, blocks_tuple, block_id, rule_id, st.session_state.min_frequency, st.session_state.min_quantity)
+                unique_vals = cached_get_unique_values_for_rule(block['position'], rule['type'], selected_lengths_tuple, blocks_tuple, block_id, rule_id, st.session_state.min_frequency, st.session_state.min_quantity, table_name=table_to_use)
                 
                 disp_opts = {f"{v[0]} (F:{format_number_with_spaces(v[1])}, Q:{format_number_with_spaces(v[2])})" if v[1] is not None else f"{v[0]} (Q:{format_number_with_spaces(v[2])})" : v[0] for v in unique_vals}
                 default_disp = [k for k, v in disp_opts.items() if v in rule['values']]
@@ -534,7 +551,8 @@ with main_col1:
 
         filter_blocks_tuple_for_suggestions = make_hashable(active_filter_blocks)
         
-        suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple_for_suggestions, st.session_state.min_frequency, st.session_state.min_quantity)
+        table_to_use = st.session_state.get("temp_table_name") or "ngrams"
+        suggestion_data = cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple_for_suggestions, st.session_state.min_frequency, st.session_state.min_quantity, table_name=table_to_use)
 
         if not suggestion_data:
             with st.expander("Подсказки для фильтрации", expanded=True):
@@ -575,7 +593,7 @@ with main_col1:
                                 for s in pos_dict[position]:
                                     is_checked = (position, s['type'], s['value']) in active_filters
                                     key = f"suggest_{position}_{s['type']}_{s['value']}"
-                                    label = f"{s['value']}  \nF: {format_number_with_spaces(s['freq'])}  \nQ: {format_number_with_spaces(s['qty'])}"
+                                    label = f"{s['value']}  \nF: {format_number_with_spaces(s['freq'])}  \nQ: {format_number_with_spaces(s['qty'])}" 
                                     
                                     st.checkbox(
                                         label, 
@@ -600,13 +618,30 @@ def _run_query():
         st.session_state.last_query = ""
         return
 
-    where_clauses = build_where_clauses(st.session_state.filter_blocks)
+    table_to_use = st.session_state.get("temp_table_name") or "ngrams"
+    where_clauses = build_where_clauses(st.session_state.filter_blocks, table_name=table_to_use)
+    
+    # The main WHERE clause for lengths is only needed for the main ngrams table
+    main_where = f"WHERE len IN ({', '.join(map(str, st.session_state.selected_lengths))})" if table_to_use == "ngrams" else ""
+    
+    # Additional filters from blocks
+    additional_where = ' AND '.join(where_clauses) if where_clauses else ''
+    
+    # Combine WHERE clauses
+    if main_where and additional_where:
+        full_where_clause = f"{main_where} AND {additional_where}"
+    elif main_where:
+        full_where_clause = main_where
+    elif additional_where:
+        full_where_clause = f"WHERE {additional_where}"
+    else:
+        full_where_clause = ""
+
     query = f"""
         SELECT text, freq_mln, tokens
-        FROM ngrams
-        WHERE len IN ({', '.join(map(str, st.session_state.selected_lengths))})
-        {'AND ' + ' AND '.join(where_clauses) if where_clauses else ''}
-        ORDER BY frequency DESC;
+        FROM {table_to_use}
+        {full_where_clause}
+        ORDER BY freq_mln DESC;
     """
     st.session_state.last_query = query.strip()
     results = execute_query(conn, st.session_state.last_query)

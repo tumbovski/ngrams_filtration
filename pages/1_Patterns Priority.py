@@ -19,22 +19,20 @@ if not conn:
 phrase_lengths_options = list(range(2, 13)) # 2 to 12
 
 # --- Session State Management ---
+# Initialize session state keys to avoid errors
 st.session_state.setdefault('selected_phrase_length', phrase_lengths_options[0])
 st.session_state.setdefault('min_total_frequency', 0)
 st.session_state.setdefault('min_total_quantity', 0)
 st.session_state.setdefault('current_pattern_to_moderate', None)
 st.session_state.setdefault('remaining_patterns_count', 0)
 st.session_state.setdefault('current_ngrams', None)
-st.session_state.setdefault('moderation_rating', None) # No default rating
 st.session_state.setdefault('moderation_comment', '')
 st.session_state.setdefault('moderation_tag', '')
-st.session_state.setdefault('rating_submitted', False)
 
 # --- Helper Functions ---
 def load_next_pattern(skipped_pattern_id=None):
     """Загружает следующий паттерн, опционально исключая только что пропущенный."""
     # Сбрасываем поля перед загрузкой нового паттерна
-    st.session_state.moderation_rating = None
     st.session_state.moderation_comment = ''
     st.session_state.moderation_tag = ''
     
@@ -48,7 +46,7 @@ def load_next_pattern(skipped_pattern_id=None):
             st.session_state.selected_phrase_length,
             min_total_frequency=min_freq,
             min_total_quantity=min_qty,
-            pattern_id_to_exclude=skipped_pattern_id # Передаем ID для исключения
+            pattern_id_to_exclude=skipped_pattern_id
         )
         st.session_state.current_pattern_to_moderate = pattern
         
@@ -77,9 +75,8 @@ def handle_phrase_length_change():
     st.session_state.selected_phrase_length = st.session_state.phrase_length_selector
     load_next_pattern()
 
-def on_rating_change():
-    """Callback, который срабатывает при выборе оценки."""
-    rating = st.session_state.moderation_rating
+def handle_rating_submission(rating):
+    """Обрабатывает нажатие кнопки оценки: сохраняет и загружает следующий паттерн."""
     if rating is None:
         return
 
@@ -91,7 +88,7 @@ def on_rating_change():
     if save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
         process_moderation_submission(conn, pattern_id)
         st.toast(f"Оценка '{rating}' принята!", icon="✅")
-        load_next_pattern()
+        load_next_pattern() # Загружаем следующий паттерн сразу после успешной отправки
     else:
         st.error("Ошибка при сохранении модерации.")
 
@@ -114,12 +111,6 @@ if 'current_pattern_to_moderate' not in st.session_state or st.session_state.cur
 
 # Define pattern here, so it's available to both columns
 pattern = st.session_state.current_pattern_to_moderate
-
-# Process rating submission if flag is set
-if st.session_state.get('rating_submitted'):
-    if pattern:
-        on_rating_change()
-    st.session_state.rating_submitted = False # Reset flag
 
 # Main layout with two columns
 ngrams_table_col, moderation_details_col = st.columns([1, 2])
@@ -196,13 +187,16 @@ with moderation_details_col:
             ratings = [1, 2, 3, 4, 5]
             for i, rating in enumerate(ratings):
                 with rating_cols[i]:
-                    if st.button(label=str(rating), key=f"rating_button_{rating}", use_container_width=True):
-                        st.session_state.moderation_rating = rating
-                        st.session_state.rating_submitted = True
-                        st.rerun()
+                    st.button(
+                        label=str(rating), 
+                        key=f"rating_button_{rating}", 
+                        use_container_width=True,
+                        on_click=handle_rating_submission,
+                        args=(rating,) # Pass the rating value to the handler
+                    )
             
             st.markdown("---")
-            # Передаем ID текущего паттерна в callback кнопки "Пропустить"
+            # Pass the current pattern's ID to the skip button's callback
             st.button("Пропустить", use_container_width=True, on_click=load_next_pattern, args=(pattern['id'],))
 
     else:
@@ -210,4 +204,3 @@ with moderation_details_col:
         st.info("Попробуйте изменить фильтры или выбрать другую длину паттерна.")
         if st.button("Проверить снова"):
             load_next_pattern()
-

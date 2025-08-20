@@ -18,7 +18,7 @@ from core.database import (
     execute_query,
     get_frequent_sequences,
     get_suggestion_data,
-    get_pattern_by_id,
+    get_pattern_by_id, # This import will now work
     create_temp_table_for_session
 )
 
@@ -103,6 +103,10 @@ def cached_get_suggestion_data(selected_lengths_tuple, filter_blocks_tuple, min_
     selected_lengths = list(selected_lengths_tuple)
     filter_blocks = make_mutable(filter_blocks_tuple)
     return get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity, table_name)
+
+@st.cache_data(ttl=3600)
+def cached_get_pattern_by_id(pattern_id):
+    return get_pattern_by_id(pattern_id)
 
 # --- Функции-коллбэки и хендлеры ---
 def clear_caches():
@@ -354,11 +358,12 @@ def load_pattern_by_id_dialog():
     pattern_id = st.number_input("Введите ID паттерна", min_value=1, step=1, value=None)
     if st.button("Загрузить паттерн"):
         if pattern_id and pattern_id > 0:
-            pattern_data = get_pattern_by_id(conn, pattern_id)
+            pattern_data = cached_get_pattern_by_id(pattern_id)
             if pattern_data:
-                pattern_text, phrase_length = pattern_data
+                pattern_text = pattern_data['text']
+                phrase_length = pattern_data['len']
                 parts = pattern_text.split('_')
-                
+
                 if len(parts) != phrase_length * 3:
                     st.error(f"Ошибка разбора паттерна: ожидалось {phrase_length * 3} частей, получено {len(parts)}.")
                     return
@@ -618,24 +623,19 @@ def _run_query():
         st.session_state.last_query = ""
         return
 
-    table_to_use = st.session_state.get("temp_table_name") or "ngrams"
+    table_to_use = st.session_state.get("temp_table_name", "ngrams")
     where_clauses = build_where_clauses(st.session_state.filter_blocks, table_name=table_to_use)
-    
-    # The main WHERE clause for lengths is only needed for the main ngrams table
-    main_where = f"WHERE len IN ({', '.join(map(str, st.session_state.selected_lengths))})" if table_to_use == "ngrams" else ""
-    
-    # Additional filters from blocks
-    additional_where = ' AND '.join(where_clauses) if where_clauses else ''
-    
-    # Combine WHERE clauses
-    if main_where and additional_where:
-        full_where_clause = f"{main_where} AND {additional_where}"
-    elif main_where:
-        full_where_clause = main_where
-    elif additional_where:
-        full_where_clause = f"WHERE {additional_where}"
-    else:
-        full_where_clause = ""
+
+    # Add min_frequency filter
+    if st.session_state.min_frequency > 0:
+        where_clauses.append(f"{table_to_use}.freq_mln >= {float(st.session_state.min_frequency)}")
+
+    # The main WHERE clause for lengths is only needed when querying the main ngrams table
+    # (the temp table is already filtered by length).
+    if table_to_use == "ngrams":
+        where_clauses.insert(0, f"len IN ({', '.join(map(str, st.session_state.selected_lengths))})")
+
+    full_where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     query = f"""
         SELECT text, freq_mln, tokens

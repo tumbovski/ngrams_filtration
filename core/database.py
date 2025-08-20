@@ -2,11 +2,9 @@ import psycopg2
 import json
 import os
 from dotenv import load_dotenv
-import bcrypt
 import uuid
-from sqlalchemy import create_engine
+import bcrypt
 
-# Загружаем переменные окружения из .env файла
 load_dotenv()
 
 # --- Конфигурация и подключение к БД ---
@@ -15,20 +13,6 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_PORT = os.getenv("DB_PORT")
-
-_engine = None
-
-def get_db_engine():
-    """Creates and returns a singleton SQLAlchemy engine instance."""
-    global _engine
-    if _engine is None:
-        try:
-            db_uri = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-            _engine = create_engine(db_uri)
-        except Exception as e:
-            print(f"Failed to create SQLAlchemy engine: {e}")
-            return None
-    return _engine
 
 COLUMN_MAPPING = {
     'dep': 'deps', 'pos': 'pos', 'tag': 'tags',
@@ -80,8 +64,6 @@ def get_user_by_login(conn, login):
             return None
     except Exception as e:
         print(f"Ошибка при получении пользователя по логину: {e}")
-        if conn:
-            conn.rollback() # Add rollback here
         return None
 
 def get_user_by_id(conn, user_id):
@@ -165,6 +147,251 @@ def update_user_details(conn, user_id, nickname, password=None, role=None):
         return False
 
 # --- Функции для работы с данными ---
+def get_relaxed_signature(full_signature, length):
+    """
+    Извлекает части POS (часть речи) и TAG (тег) из полной сигнатуры паттерна.
+    """
+    if not full_signature or not isinstance(full_signature, str):
+        return ""
+    parts = full_signature.split('_')
+    if len(parts) < 3 * length:
+        parts.extend([''] * (3 * length - len(parts)))
+    pos = parts[length:2*length]
+    tags = parts[2*length:3*length]
+    return '_'.join(pos + tags)
+
+def get_pattern_by_id(pattern_id):
+    """
+    Получает полную информацию о паттерне по его ID.
+    Создает собственное подключение, чтобы быть кэшируемой функцией.
+    """
+    conn = get_db_connection()
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, pattern_text, phrase_length, total_frequency, total_quantity FROM unique_patterns WHERE id = %s", (pattern_id,))
+            p = cur.fetchone()
+            if p:
+                relaxed_sig = get_relaxed_signature(p[1], p[2])
+                return {"id": p[0], "text": p[1], "len": p[2], "freq": p[3], "qty": p[4], "relaxed_sig": relaxed_sig}
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении паттерна по ID: {e}")
+        return None
+    finally:
+        if conn: conn.close()
+
+# --- Функции для модерации ---
+def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0, pattern_id_to_exclude=None):
+    """
+    Получает следующий немодерированный паттерн для указанного пользователя,
+    соответствующий заданным критериям.
+    """
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity
+                FROM unique_patterns up
+                LEFT JOIN moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %(user_id)s
+                WHERE mp.id IS NULL
+                  AND up.phrase_length = %(phrase_length)s
+                  AND up.total_frequency >= %(min_freq)s
+                  AND up.total_quantity >= %(min_qty)s
+            """
+            params = {
+                'user_id': user_id,
+                'phrase_length': phrase_length,
+                'min_freq': min_total_frequency,
+                'min_qty': min_total_quantity
+            }
+            
+            if pattern_id_to_exclude:
+                query += " AND up.id != %(exclude_id)s"
+                params['exclude_id'] = pattern_id_to_exclude
+
+            query += " ORDER BY up.total_frequency DESC, up.id LIMIT 1;"
+            
+            cur.execute(query, params)
+            pattern = cur.fetchone()
+            if pattern:
+                return {
+                    "id": pattern[0], "pattern_text": pattern[1], "phrase_length": pattern[2],
+                    "total_frequency": pattern[3], "total_quantity": pattern[4]
+                }
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении следующего паттерна для модерации: {e}")
+        return None
+
+def count_unmoderated_patterns(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0):
+    """
+    Считает количество немодерированных паттернов, соответствующих критериям.
+    """
+    if not conn: return 0
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT COUNT(up.id)
+                FROM unique_patterns up
+                LEFT JOIN moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %(user_id)s
+                WHERE mp.id IS NULL
+                  AND up.phrase_length = %(phrase_length)s
+                  AND up.total_frequency >= %(min_freq)s
+                  AND up.total_quantity >= %(min_qty)s
+            """
+            params = {
+                'user_id': user_id,
+                'phrase_length': phrase_length,
+                'min_freq': min_total_frequency,
+                'min_qty': min_total_quantity
+            }
+            cur.execute(query, params)
+            count = cur.fetchone()
+            return count[0] if count else 0
+    except Exception as e:
+        print(f"Ошибка при подсчете немодерированных паттернов: {e}")
+        return 0
+
+def get_examples_by_pattern_id(conn, pattern_id):
+    """
+    Получает примеры фраз для заданного ID паттерна из таблицы pattern_examples.
+    """
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT example_text, example_frequency FROM pattern_examples WHERE pattern_id = %s ORDER BY example_frequency DESC LIMIT 50;", (pattern_id,))
+            return cur.fetchall()
+    except Exception as e:
+        print(f"Ошибка при получении примеров для паттерна {pattern_id}: {e}")
+        return []
+
+def save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
+    """
+    Сохраняет запись о модерации в базу данных.
+    """
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO moderation_patterns (pattern_id, user_id, rating, comment, tag) VALUES (%s, %s, %s, %s, %s);",
+                (pattern_id, user_id, rating, comment, tag)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при сохранении записи модерации: {e}")
+        conn.rollback()
+        return False
+
+def process_moderation_submission(conn, pattern_id):
+    """
+    Пересчитывает и обновляет агрегированные данные модерации для паттерна
+    в таблице unique_patterns.
+    """
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(id), AVG(rating), STDDEV_SAMP(rating)
+                FROM moderation_patterns WHERE pattern_id = %s;
+            """, (pattern_id,))
+            stats = cur.fetchone()
+            moderation_count, avg_rating, stddev_rating = stats[0], stats[1], stats[2]
+            cur.execute("""
+                UPDATE unique_patterns SET moderation_count = %s, avg_rating = %s, stddev_rating = %s
+                WHERE id = %s;
+            """, (moderation_count, avg_rating, stddev_rating, pattern_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при обработке результатов модерации для паттерна {pattern_id}: {e}")
+        conn.rollback()
+        return False
+
+def get_moderation_history(conn, user_id):
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT mp.id, mp.pattern_id, up.pattern_text, mp.rating, mp.comment, mp.tag, mp.submitted_at
+                FROM moderation_patterns mp JOIN unique_patterns up ON mp.pattern_id = up.id
+                WHERE mp.user_id = %s ORDER BY mp.submitted_at DESC;
+            """, (user_id,))
+            return [{"id": r[0], "pattern_id": r[1], "pattern_text": r[2], "rating": r[3], "comment": r[4], "tag": r[5], "submitted_at": r[6]} for r in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка при получении истории модераций: {e}")
+        return []
+
+def update_moderation_entry(conn, entry_id, new_rating, new_comment, new_tag):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE moderation_patterns SET rating = %s, comment = %s, tag = %s, submitted_at = NOW() WHERE id = %s;", (new_rating, new_comment, new_tag, entry_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при обновлении записи модерации: {e}")
+        conn.rollback()
+        return False
+
+def delete_moderation_record(conn, entry_id):
+    if not conn: return False, None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pattern_id FROM moderation_patterns WHERE id = %s;", (entry_id,))
+            res = cur.fetchone()
+            if not res: return False, None
+            pattern_id = res[0]
+            cur.execute("DELETE FROM moderation_patterns WHERE id = %s;", (entry_id,))
+            conn.commit()
+            return True, pattern_id
+    except Exception as e:
+        print(f"Ошибка при удалении записи модерации: {e}")
+        conn.rollback()
+        return False, None
+
+def create_temp_table_for_session(conn, selected_lengths):
+    """
+    Создает временную таблицу для сессии, содержащую n-граммы только выбранных длин.
+    Это значительно ускоряет последующие запросы на фильтрацию и получение подсказок.
+    """
+    if not conn or not selected_lengths:
+        return None
+    
+    # Генерируем уникальное имя для временной таблицы
+    table_name = f"temp_ngrams_{str(uuid.uuid4()).replace('-', '_')}"
+
+    try:
+        with conn.cursor() as cur:
+            # ON COMMIT PRESERVE ROWS важно, так как Streamlit может выполнять коммиты между rerun'ами
+            cur.execute(f"""
+                CREATE TEMP TABLE IF NOT EXISTS {table_name} (
+                    LIKE ngrams INCLUDING ALL
+                ) ON COMMIT PRESERVE ROWS;
+            """)
+
+            lengths_tuple = tuple(selected_lengths)
+            # Вставляем данные во временную таблицу
+            cur.execute(f"INSERT INTO {table_name} SELECT * FROM ngrams WHERE len IN %s;", (lengths_tuple,))
+
+            # Создаем индексы для ускорения
+            # B-Tree index for frequency is useful for sorting and range queries.
+            cur.execute(f"CREATE INDEX ON {table_name} (freq_mln);")
+            # GIN indexes are crucial for accelerating containment queries (@>) on JSONB arrays.
+            cur.execute(f"CREATE INDEX ON {table_name} USING gin (deps);")
+            cur.execute(f"CREATE INDEX ON {table_name} USING gin (pos);")
+            cur.execute(f"CREATE INDEX ON {table_name} USING gin (tags);")
+            cur.execute(f"CREATE INDEX ON {table_name} USING gin (tokens);")
+            cur.execute(f"CREATE INDEX ON {table_name} USING gin (lemmas);")
+            cur.execute(f"CREATE INDEX ON {table_name} USING gin (morph);")
+            conn.commit()
+            return table_name
+    except Exception as e:
+        print(f"Ошибка при создании временной таблицы: {e}")
+        conn.rollback()
+        return None
+
 def get_all_unique_lengths(conn):
     if not conn: return []
     try:
@@ -175,78 +402,40 @@ def get_all_unique_lengths(conn):
         print(f"Ошибка при получении длин: {e}")
         return []
 
-def create_temp_table_for_session(conn, lengths):
-    """
-    Создает временную таблицу для сессии пользователя, содержащую n-граммы
-    выбранных длин для ускорения последующих запросов.
-    """
-    if not conn or not lengths:
-        return None
-
-    table_name = f"temp_ngrams_{uuid.uuid4().hex}"
-    
-    try:
-        with conn.cursor() as cur:
-            # Создаем временную таблицу с данными
-            cur.execute(
-                f"""
-                CREATE TEMP TABLE {table_name} AS
-                SELECT * FROM ngrams WHERE len = ANY(%s);
-                """,
-                (lengths,)
-            )
-            
-            # Добавляем индексы для ускорения запросов
-            max_len = max(lengths) if lengths else 0
-            for i in range(max_len):
-                # Для каждой позиции создаем покрывающий индекс, включающий частотность и id,
-                # чтобы разрешить сканирование только по индексу (Index-Only Scans).
-                cur.execute(f"CREATE INDEX ON {table_name} ((deps->>{i})) INCLUDE (freq_mln, id);")
-                cur.execute(f"CREATE INDEX ON {table_name} ((pos->>{i})) INCLUDE (freq_mln, id);")
-                cur.execute(f"CREATE INDEX ON {table_name} ((tags->>{i})) INCLUDE (freq_mln, id);")
-
-            # GIN-индекс по-прежнему лучше всего подходит для сложной структуры 'morph'
-            cur.execute(f"CREATE INDEX ON {table_name} USING gin(morph);")
-            cur.execute(f"CREATE INDEX ON {table_name} (len);")
-            
-            # Собираем статистику для оптимизатора запросов
-            cur.execute(f"ANALYZE {table_name};")
-            
-            conn.commit()
-            return table_name
-    except Exception as e:
-        print(f"Ошибка при создании временной таблицы: {e}")
-        conn.rollback()
-        return None
-
-def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency=0.0, min_quantity=0, table_name="ngrams"):
+def get_unique_values_for_rule(conn, position, rule_type, selected_lengths, all_blocks, block_id_to_exclude, rule_id_to_exclude, min_frequency, min_quantity, table_name="ngrams"):
     if not conn: return []
     db_column_name = COLUMN_MAPPING.get(rule_type, rule_type)
-    preceding_where_clauses = build_where_clauses(all_blocks, table_name, block_id_to_exclude, rule_id_to_exclude)
+    preceding_where_clauses = build_where_clauses(all_blocks, block_id_to_exclude, rule_id_to_exclude, table_name=table_name)
     
-    if table_name == "ngrams" and selected_lengths:
-        preceding_where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
+    if selected_lengths:
+        preceding_where_clauses.append(f"{table_name}.len IN ({', '.join(map(str, selected_lengths))})")
     
+    if min_frequency > 0:
+        preceding_where_clauses.append(f"{table_name}.freq_mln >= {float(min_frequency)}")
+
     preceding_where_str = " AND " + " AND ".join(preceding_where_clauses) if preceding_where_clauses else ""
     base_where = f"jsonb_array_length({table_name}.{db_column_name}) > {position}"
 
-    query_template = f"SELECT {{field}}, SUM(freq_mln), COUNT(id) FROM {table_name} WHERE {{base_where}} {{preceding_where_str}} GROUP BY 1 HAVING SUM(freq_mln) >= %s AND COUNT(id) >= %s ORDER BY 2 DESC;"
+    # Применяем min_quantity через HAVING для корректной фильтрации
+    having_clause = f"HAVING COUNT(id) >= {int(min_quantity)}" if min_quantity > 0 else ""
+
+    query_template = "SELECT {field}, SUM(freq_mln), COUNT(id) FROM {table_name} WHERE {base_where} {preceding_where_str} GROUP BY 1 {having_clause} ORDER BY 2 DESC;"
     if db_column_name == 'morph':
         field = f"jsonb_array_elements_text({table_name}.morph->{position})"
     else:
         field = f"{table_name}.{db_column_name}->>{position}"
     
-    query = query_template.format(field=field, base_where=base_where, preceding_where_str=preceding_where_str)
+    query = query_template.format(field=field, table_name=table_name, base_where=base_where, preceding_where_str=preceding_where_str, having_clause=having_clause)
     
     try:
         with conn.cursor() as cur:
-            cur.execute(query, (min_frequency, min_quantity))
+            cur.execute(query)
             return [(r[0], r[1], r[2]) for r in cur.fetchall() if r[0] is not None]
     except Exception as e:
         print(f"Ошибка при получении уникальных значений: {e}")
         return []
 
-def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, selected_lengths, limit=100, table_name="ngrams"):
+def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, selected_lengths, table_name="ngrams", limit=100):
     if not conn: return []
     db_column_name = COLUMN_MAPPING.get(sequence_type, sequence_type)
     
@@ -262,9 +451,9 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
     select_clause = ", ".join(select_parts)
     group_by_clause = ", ".join(group_by_parts)
 
-    where_clauses = build_where_clauses(filter_blocks, table_name)
-    if table_name == "ngrams" and selected_lengths:
-        where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
+    where_clauses = build_where_clauses(filter_blocks, table_name=table_name)
+    if selected_lengths:
+        where_clauses.append(f"{table_name}.len IN ({', '.join(map(str, selected_lengths))})")
 
     # Добавляем условие на длину фразы для текущего запроса
     where_clauses.append(f"len = {phrase_length}")
@@ -276,7 +465,7 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
         SELECT
             {select_clause},
             SUM(freq_mln) as total_frequency,
-            COUNT(*) as quantity
+            COUNT(id) as total_quantity
         FROM
             {table_name}
         WHERE
@@ -297,111 +486,73 @@ def get_frequent_sequences(conn, sequence_type, phrase_length, filter_blocks, se
         print(f"Ошибка при получении частых последовательностей {sequence_type} для длины {phrase_length}: {e}")
         return []
 
-def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency=0.0, min_quantity=0, table_name="ngrams"):
+def get_suggestion_data(conn, selected_lengths, filter_blocks, min_frequency, min_quantity, table_name="ngrams"):
     """
-    Получает данные для панели подсказок: доступные варианты фильтрации
-    для каждой позиции, отсортированные по частотности.
+    Получает данные для панели подсказок.
+    Эта версия оптимизирована и использует один сложный SQL-запрос вместо множества UNION ALL,
+    что значительно повышает производительность.
     """
     if not conn or not selected_lengths:
         return {}
 
-    max_len = max(selected_lengths) if selected_lengths else 0
-    if max_len == 0:
-        return {}
+    max_len = max(selected_lengths)
 
-    base_where_clauses = build_where_clauses(filter_blocks, table_name)
-    if table_name == "ngrams": # Only add length filter if using main table
-        base_where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
-    
-    base_where_str = " AND " + " AND ".join(base_where_clauses) if base_where_clauses else ""
+    where_clauses = build_where_clauses(filter_blocks, table_name=table_name)
+    if table_name == "ngrams":
+        where_clauses.append(f"len IN ({', '.join(map(str, selected_lengths))})")
+    if min_frequency > 0:
+        where_clauses.append(f"freq_mln >= {float(min_frequency)}")
 
-    suggestion_types = ['dep', 'pos', 'tag', 'morph']
-    
-    union_parts = []
-    for i in range(max_len):
-        for rule_type in suggestion_types:
-            is_filtered = any(
-                rule['type'] == rule_type and rule['values'] and rule.get('operator', 'include') == 'include'
-                for block in filter_blocks if block['position'] == i 
-                for rule in block['rules']
-            )
-            
-            if not is_filtered:
-                db_column = COLUMN_MAPPING[rule_type]
-                if rule_type == 'morph':
-                    # Запрос для структуры "массив массивов строк" (для morph)
-                    union_parts.append(f"""
-                        SELECT 
-                            {i} as position, 
-                            '{rule_type}' as type, 
-                            jsonb_array_elements_text({table_name}.{db_column}->{i}) as value, 
-                            SUM(freq_mln) as frequency,
-                            COUNT(id) as quantity
-                        FROM {table_name}
-                        WHERE 
-                            jsonb_array_length({table_name}.{db_column}) > {i} AND
-                            jsonb_typeof({table_name}.{db_column}->{i}) = 'array'
-                            {base_where_str}
-                        GROUP BY 1, 2, 3
-                        HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d}
-                    """)
-                else:
-                    # Запрос для структуры "массив строк" (для dep, pos, tag)
-                    union_parts.append(f"""
-                        SELECT 
-                            {i} as position, 
-                            '{rule_type}' as type, 
-                            {table_name}.{db_column}->>{i} as value, 
-                            SUM(freq_mln) as frequency,
-                            COUNT(id) as quantity
-                        FROM {table_name}
-                        WHERE 
-                            jsonb_array_length({table_name}.{db_column}) > {i}
-                            {base_where_str}
-                        GROUP BY 1, 2, 3
-                        HAVING SUM(freq_mln) >= {min_frequency:.3f} AND COUNT(id) >= {min_quantity:d}
-                    """)
+    base_where_str = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-    if not union_parts:
-        return {} 
-
-    full_query = " UNION ALL ".join(union_parts)
-    full_query += " ORDER BY position, frequency DESC"
+    query = f"""
+    WITH filtered_ngrams AS (
+        SELECT * FROM {table_name} WHERE {base_where_str}
+    ),
+    unpacked_values AS (
+        SELECT i.pos AS position, 'dep' AS type, fn.deps->>i.pos AS value, fn.freq_mln
+        FROM filtered_ngrams fn, LATERAL generate_series(0, jsonb_array_length(fn.deps) - 1) AS i(pos)
+        UNION ALL
+        SELECT i.pos AS position, 'pos' AS type, fn.pos->>i.pos AS value, fn.freq_mln
+        FROM filtered_ngrams fn, LATERAL generate_series(0, jsonb_array_length(fn.pos) - 1) AS i(pos)
+        UNION ALL
+        SELECT i.pos AS position, 'tag' AS type, fn.tags->>i.pos AS value, fn.freq_mln
+        FROM filtered_ngrams fn, LATERAL generate_series(0, jsonb_array_length(fn.tags) - 1) AS i(pos)
+        UNION ALL
+        SELECT i.pos AS position, 'morph' AS type, m.value, fn.freq_mln
+        FROM filtered_ngrams fn,
+                LATERAL generate_series(0, jsonb_array_length(fn.morph) - 1) AS i(pos),
+                LATERAL jsonb_array_elements_text(fn.morph->i.pos) AS m(value)
+    )
+    SELECT
+        uv.position, uv.type, uv.value, SUM(uv.freq_mln) AS total_freq, COUNT(*) AS total_qty
+    FROM unpacked_values uv
+    WHERE uv.value IS NOT NULL AND uv.value != '' AND uv.position < {max_len}
+    GROUP BY uv.position, uv.type, uv.value
+    HAVING COUNT(*) >= {int(min_quantity)}
+    ORDER BY uv.position, total_freq DESC;
+    """
 
     try:
         with conn.cursor() as cur:
-            cur.execute(full_query)
+            cur.execute(query)
             results = cur.fetchall()
             
             suggestion_data = {}
+            active_filters = {(b['position'], r['type']) for b in filter_blocks for r in b['rules'] if r.get('values')}
+
             for pos, r_type, r_val, r_freq, r_qty in results:
-                if r_val is None or r_val == '': continue
-                
+                if (pos, r_type) in active_filters:
+                    continue
                 if pos not in suggestion_data:
                     suggestion_data[pos] = []
-                
-                suggestion_data[pos].append({
-                    "type": r_type,
-                    "value": r_val,
-                    "freq": r_freq,
-                    "qty": r_qty
-                })
-
-            for pos in suggestion_data:
-                unique_items = {item['value']: item for item in suggestion_data[pos]}.values()
-                suggestion_data[pos] = sorted(list(unique_items), key=lambda x: x['freq'], reverse=True)
+                suggestion_data[pos].append({"type": r_type, "value": r_val, "freq": r_freq, "qty": r_qty})
 
             return suggestion_data
     except Exception as e:
         print(f"Ошибка при получении данных для подсказок: {e}")
         conn.rollback()
         return {}
-    except Exception as e:
-        print(f"Ошибка при получении данных для подсказок: {e}")
-        conn.rollback()
-        return {}
-
-
 
 # --- Функции для сохранения/загрузки НАБОРОВ ---
 def save_filter_set(conn, name, data):
@@ -496,7 +647,7 @@ def delete_block_by_name(conn, name):
         return False
 
 # --- Построение SQL ---
-def build_where_clauses(blocks, table_name="ngrams", block_id_to_skip=None, rule_id_to_skip=None):
+def build_where_clauses(blocks, block_id_to_skip=None, rule_id_to_skip=None, table_name="ngrams"):
     where_clauses = []
     for block in blocks:
         if block['id'] == block_id_to_skip and rule_id_to_skip is None: continue
@@ -505,21 +656,33 @@ def build_where_clauses(blocks, table_name="ngrams", block_id_to_skip=None, rule
         for rule in block['rules']:
             if block['id'] == block_id_to_skip and rule['id'] == rule_id_to_skip: continue
             if not rule['values']: continue
-            db_col_type = COLUMN_MAPPING[rule['type']]
+
+            operator = rule.get('operator', 'include')
+            db_col_type = COLUMN_MAPPING.get(rule['type'])
             values = rule['values']
-            operator = rule.get('operator', 'include') # По умолчанию 'include'
+            
+            if not db_col_type: continue # Should not happen with valid UI
+
+            length_check = f"jsonb_array_length({table_name}.{db_col_type}) > {position}"
+
             if db_col_type == 'morph':
-                conditions = ' OR '.join([f"{table_name}.morph->{position} @> '{json.dumps(v)}'::jsonb" for v in values])
-                if operator == 'exclude':
-                    block_rules.append(f"(jsonb_array_length({table_name}.morph) > {position} AND NOT ({conditions}))")
-                else:
-                    block_rules.append(f"(jsonb_array_length({table_name}.morph) > {position} AND ({conditions}))")
+                # For morph, which is an array of arrays.
+                conditions = ' OR '.join([f"{table_name}.morph->{position} @> '[\"{v}\"]'::jsonb" for v in values])
+                rule_logic = f"({conditions})"
             else:
-                vals_str = ", ".join([f"'{v}'" for v in values])
-                if operator == 'exclude':
-                    block_rules.append(f"(jsonb_array_length({table_name}.{db_col_type}) > {position} AND {table_name}.{db_col_type}->>{position} NOT IN ({vals_str}))")
-                else:
-                    block_rules.append(f"(jsonb_array_length({table_name}.{db_col_type}) > {position} AND {table_name}.{db_col_type}->>{position} IN ({vals_str}))")
+                # For simple arrays (dep, pos, tag, etc.)
+                # Use @> for index-based pre-filtering, then an exact positional check.
+                containment_conditions = ' OR '.join([f"{table_name}.{db_col_type} @> '[\"{v}\"]'::jsonb" for v in values])
+                positional_values = ", ".join([f"'{v}'" for v in values])
+                positional_check = f"{table_name}.{db_col_type}->>{position} IN ({positional_values})"
+                rule_logic = f"(({containment_conditions}) AND {positional_check})"
+
+            # Apply operator
+            if operator == 'exclude':
+                block_rules.append(f"({length_check} AND NOT {rule_logic})")
+            else: # include
+                block_rules.append(f"({length_check} AND {rule_logic})")
+
         if block_rules:
             where_clauses.append(f"({' AND '.join(block_rules)})")
     return where_clauses
@@ -534,281 +697,3 @@ def execute_query(conn, query):
     except Exception as e:
         print(f"Ошибка выполнения запроса: {e}")
         return []
-
-# --- Функции для модерации паттернов ---
-def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0, pattern_id_to_exclude=None):
-    if not conn: return None
-    try:
-        with conn.cursor() as cur:
-            exclude_clause = ""
-            params = [user_id, phrase_length, min_total_frequency, min_total_quantity]
-            if pattern_id_to_exclude is not None:
-                exclude_clause = "AND up.id != %s"
-                params.append(pattern_id_to_exclude)
-
-            query = f"""
-                SELECT
-                    up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
-                    up.final_rating, up.final_tag, up.final_comment
-                FROM
-                    unique_patterns up
-                LEFT JOIN
-                    moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %s
-                WHERE
-                    up.phrase_length = %s AND mp.id IS NULL
-                    AND up.total_frequency >= %s
-                    AND up.total_quantity >= %s
-                    {exclude_clause}
-                ORDER BY
-                    up.total_frequency DESC
-                LIMIT 1;
-            """
-            cur.execute(query, tuple(params))
-            row = cur.fetchone()
-            if row:
-                return {
-                    "id": row[0],
-                    "pattern_text": row[1],
-                    "phrase_length": row[2],
-                    "total_frequency": row[3],
-                    "total_quantity": row[4],
-                    "final_rating": row[5],
-                    "final_tag": row[6],
-                    "final_comment": row[7]
-                }
-            return None
-    except Exception as e:
-        print(f"Ошибка при получении следующего неотмодерированного паттерна: {e}")
-        return None
-
-def count_unmoderated_patterns(conn, user_id, phrase_length, min_total_frequency=0, min_total_quantity=0):
-    if not conn: return 0
-    try:
-        with conn.cursor() as cur:
-            query = """
-                SELECT
-                    COUNT(up.id)
-                FROM
-                    unique_patterns up
-                LEFT JOIN
-                    moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %s
-                WHERE
-                    up.phrase_length = %s AND mp.id IS NULL
-                    AND up.total_frequency >= %s
-                    AND up.total_quantity >= %s;
-            """
-            cur.execute(query, (user_id, phrase_length, min_total_frequency, min_total_quantity))
-            count = cur.fetchone()[0]
-            return count
-    except Exception as e:
-        print(f"Ошибка при подсчете неотмодерированных паттернов: {e}")
-        return 0
-
-def get_examples_by_pattern_id(conn, pattern_id):
-    if not conn: return []
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT example_text, example_frequency FROM pattern_examples WHERE pattern_id = %s ORDER BY example_frequency DESC;",
-                (pattern_id,)
-            )
-            return cur.fetchall()
-    except Exception as e:
-        print(f"Ошибка при получении примеров для паттерна: {e}")
-        return []
-
-def get_ngrams_by_pattern_text_for_population(conn, pattern_text):
-    if not conn: return []
-    try:
-        # This is the original, slow query, intended only for the population script.
-        query = """
-            SELECT
-                n.text,
-                n.freq_mln
-            FROM
-                ngrams n
-            WHERE
-                (
-                    SELECT STRING_AGG(elem->>0, '_')
-                    FROM jsonb_array_elements(n.deps) AS elem
-                ) || '_' ||
-                (
-                    SELECT STRING_AGG(elem->>0, '_')
-                    FROM jsonb_array_elements(n.pos) AS elem
-                ) || '_' ||
-                (
-                    SELECT STRING_AGG(elem->>0, '_')
-                    FROM jsonb_array_elements(n.tags) AS elem
-                ) = %s
-            ORDER BY
-                n.freq_mln DESC
-            LIMIT 50;
-        """
-        with conn.cursor() as cur:
-            cur.execute(query, (pattern_text,))
-            return cur.fetchall()
-    except Exception as e:
-        print(f"Ошибка при получении ngrams для заполнения: {e}")
-        return []
-
-def get_pattern_by_id(conn, pattern_id):
-    """Получает pattern_text и phrase_length по ID паттерна."""
-    if not conn: return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT pattern_text, phrase_length FROM unique_patterns WHERE id = %s", (pattern_id,))
-            res = cur.fetchone()
-            return res if res else None
-    except Exception as e:
-        print(f"Ошибка при получении паттерна по ID: {e}")
-        return None
-
-def save_moderation_record(conn, pattern_id, user_id, rating, comment, tag):
-    if not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO moderation_patterns (pattern_id, user_id, rating, comment, tag) VALUES (%s, %s, %s, %s, %s);",
-                (pattern_id, user_id, rating, comment, tag)
-            )
-            conn.commit()
-            return True
-    except Exception as e:
-        print(f"Ошибка при сохранении записи модерации: {e}")
-        conn.rollback()
-        return False
-
-def get_moderation_history(conn, user_id):
-    if not conn: return []
-    try:
-        with conn.cursor() as cur:
-            query = """
-                SELECT
-                    mp.id,
-                    up.pattern_text,
-                    mp.rating,
-                    mp.comment,
-                    mp.tag,
-                    mp.pattern_id,
-                    mp.submitted_at
-                FROM
-                    moderation_patterns mp
-                JOIN
-                    unique_patterns up ON mp.pattern_id = up.id
-                WHERE
-                    mp.user_id = %s
-                ORDER BY
-                    mp.submitted_at DESC;
-            """
-            cur.execute(query, (user_id,))
-            records = cur.fetchall()
-            return [{
-                "id": row[0],
-                "pattern_text": row[1],
-                "rating": row[2],
-                "comment": row[3],
-                "tag": row[4],
-                "pattern_id": row[5],
-                "submitted_at": row[6]
-            } for row in records]
-    except Exception as e:
-        print(f"Ошибка при получении истории модераций: {e}")
-        if conn:
-            conn.rollback() # Add rollback here
-        return []
-
-def update_moderation_entry(conn, entry_id, new_rating, new_comment, new_tag):
-    if not conn: return False
-    try:
-        with conn.cursor() as cur:
-            # Get pattern_id before updating
-            cur.execute("SELECT pattern_id FROM moderation_patterns WHERE id = %s;", (entry_id,))
-            pattern_id = cur.fetchone()[0]
-
-            cur.execute(
-                "UPDATE moderation_patterns SET rating = %s, comment = %s, tag = %s WHERE id = %s;",
-                (new_rating, new_comment, new_tag, entry_id)
-            )
-            conn.commit()
-
-            # Re-process moderation submission for the pattern
-            process_moderation_submission(conn, pattern_id)
-            return True
-    except Exception as e:
-        print(f"Ошибка при обновлении записи модерации: {e}")
-        conn.rollback()
-        return False
-
-def process_moderation_submission(conn, pattern_id):
-    if not conn: return
-    try:
-        with conn.cursor() as cur:
-            # 1. Получаем все записи модерации для данного паттерна
-            cur.execute(
-                "SELECT user_id, rating, comment, tag FROM moderation_patterns WHERE pattern_id = %s;",
-                (pattern_id,)
-            )
-            moderation_records = cur.fetchall()
-
-            if not moderation_records: return # No records, nothing to process
-
-            # 2. Подсчитываем количество уникальных модераторов и средний рейтинг
-            unique_users = set()
-            total_rating = 0
-            for record in moderation_records:
-                unique_users.add(record[0]) # user_id
-                total_rating += record[1] # rating
-            
-            moderated_by_count = len(unique_users)
-            final_rating = total_rating / len(moderation_records) if moderation_records else None
-
-            # 3. Определяем final_tag и final_comment на основе совпадений
-            # Для простоты, если есть хотя бы 2 записи, и теги/комментарии совпадают, берем их.
-            # Более сложная логика (например, большинство голосов) может быть добавлена позже.
-            final_tag = None
-            final_comment = None
-
-            if len(moderation_records) >= 2:
-                # Проверяем совпадение тегов
-                tags = [r[3] for r in moderation_records if r[3] is not None and r[3] != '']
-                if len(tags) >= 2 and all(t == tags[0] for t in tags):
-                    final_tag = tags[0]
-                
-                # Проверяем совпадение комментариев
-                comments = [r[2] for r in moderation_records if r[2] is not None and r[2] != '']
-                if len(comments) >= 2 and all(c == comments[0] for c in comments):
-                    final_comment = comments[0]
-
-            # 4. Обновляем unique_patterns
-            cur.execute(
-                "UPDATE unique_patterns SET final_rating = %s, final_tag = %s, final_comment = %s, moderated_by_count = %s WHERE id = %s;",
-                (final_rating, final_tag, final_comment, moderated_by_count, pattern_id)
-            )
-            conn.commit()
-    except Exception as e:
-        print(f"Ошибка при обработке отправки модерации: {e}")
-        conn.rollback()
-
-def delete_moderation_record(conn, entry_id):
-    """Удаляет запись модерации и возвращает ID связанного паттерна."""
-    if not conn: return False, None
-    try:
-        with conn.cursor() as cur:
-            # Сначала получаем pattern_id, чтобы вернуть его для переобработки
-            cur.execute("SELECT pattern_id FROM moderation_patterns WHERE id = %s;", (entry_id,))
-            result = cur.fetchone()
-            if not result:
-                return False, None # Запись не найдена
-
-            pattern_id = result[0]
-
-            # Теперь удаляем запись
-            cur.execute("DELETE FROM moderation_patterns WHERE id = %s;", (entry_id,))
-            conn.commit()
-            
-            # Возвращаем True и pattern_id для переобработки
-            return True, pattern_id
-    except Exception as e:
-        print(f"Ошибка при удалении записи модерации: {e}")
-        conn.rollback()
-        return False, None

@@ -16,31 +16,49 @@ def get_relaxed_signature(full_signature, length):
 
 @st.cache_resource(ttl=3600)
 def build_relaxed_lookup():
-    """Builds a lookup mapping relaxed signatures to full pattern details."""
+    """Builds a lookup mapping relaxed signatures to full pattern details using a pre-calculated column."""
     conn = get_db_connection()
     if not conn:
         st.error("Failed to connect to the database.")
         return {}
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, pattern_text, phrase_length, total_frequency, total_quantity FROM unique_patterns")
-            all_patterns = cur.fetchall()
-            
-            relaxed_lookup = {}
-            for pat_id, pat_text, pat_len, pat_freq, pat_qty in all_patterns:
-                if pat_len > 0:
-                    relaxed_sig = get_relaxed_signature(pat_text, pat_len)
-                    if relaxed_sig not in relaxed_lookup:
-                        relaxed_lookup[relaxed_sig] = []
-                    relaxed_lookup[relaxed_sig].append({
+        # Этот запрос использует новую колонку и индекс, что значительно быстрее,
+        # чем обработка всех данных в Python.
+        query = """
+            SELECT
+                relaxed_signature,
+                id,
+                pattern_text,
+                phrase_length,
+                total_frequency,
+                total_quantity
+            FROM unique_patterns
+            WHERE relaxed_signature IS NOT NULL
+            ORDER BY relaxed_signature, total_frequency DESC;
+        """
+        
+        relaxed_lookup = {}
+        with conn.cursor(name='fetch_all_patterns') as cur:
+            cur.execute(query)
+            while True:
+                rows = cur.fetchmany(20000)
+                if not rows:
+                    break
+                for rel_sig, pat_id, pat_text, pat_len, pat_freq, pat_qty in rows:
+                    if rel_sig not in relaxed_lookup:
+                        relaxed_lookup[rel_sig] = []
+                    
+                    # Данные уже отсортированы по частоте, просто добавляем.
+                    relaxed_lookup[rel_sig].append({
                         "id": pat_id, "text": pat_text, "len": pat_len,
                         "freq": pat_freq, "qty": pat_qty
                     })
-            for sig in relaxed_lookup:
-                relaxed_lookup[sig] = sorted(relaxed_lookup[sig], key=lambda x: x['freq'], reverse=True)
-            return relaxed_lookup
+        return relaxed_lookup
     except Exception as e:
-        st.error(f"Error building relaxed lookup: {e}")
+        if "column \"relaxed_signature\" does not exist" in str(e):
+            st.error("Ошибка: колонка `relaxed_signature` не найдена. Пожалуйста, выполните миграцию БД для ее добавления. Это значительно ускорит работу.")
+        else:
+            st.error(f"Error building relaxed lookup: {e}")
         return {}
     finally:
         if conn: conn.close()

@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 import bcrypt
 import uuid
+from sqlalchemy import create_engine
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -14,6 +15,20 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_PORT = os.getenv("DB_PORT")
+
+_engine = None
+
+def get_db_engine():
+    """Creates and returns a singleton SQLAlchemy engine instance."""
+    global _engine
+    if _engine is None:
+        try:
+            db_uri = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+            _engine = create_engine(db_uri)
+        except Exception as e:
+            print(f"Failed to create SQLAlchemy engine: {e}")
+            return None
+    return _engine
 
 COLUMN_MAPPING = {
     'dep': 'deps', 'pos': 'pos', 'tag': 'tags',

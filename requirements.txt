@@ -3,3 +3,5 @@ psycopg2-binary
 python-dotenv
 bcrypt
 streamlit-cookies-manager
+pyahocorasick
+SQLAlchemy

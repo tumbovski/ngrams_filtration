@@ -323,6 +323,46 @@ def get_moderation_history(conn, user_id):
         print(f"Ошибка при получении истории модераций: {e}")
         return []
 
+def get_moderated_patterns_ordered_by_rating(conn, min_rating=1, max_rating=5, limit=100):
+    """
+    Получает отмодерированные паттерны, отсортированные по убыванию среднего рейтинга.
+    """
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT 
+                    up.id, 
+                    up.pattern_text, 
+                    up.phrase_length, 
+                    up.total_frequency, 
+                    up.total_quantity,
+                    up.avg_rating,
+                    up.moderation_count
+                FROM unique_patterns up
+                WHERE up.avg_rating IS NOT NULL 
+                  AND up.avg_rating >= %s 
+                  AND up.avg_rating <= %s
+                ORDER BY up.avg_rating DESC, up.total_frequency DESC
+                LIMIT %s;
+            """
+            cur.execute(query, (min_rating, max_rating, limit))
+            patterns = []
+            for row in cur.fetchall():
+                patterns.append({
+                    "id": row[0],
+                    "pattern_text": row[1],
+                    "phrase_length": row[2],
+                    "total_frequency": row[3],
+                    "total_quantity": row[4],
+                    "avg_rating": row[5],
+                    "moderation_count": row[6]
+                })
+            return patterns
+    except Exception as e:
+        print(f"Ошибка при получении отмодерированных паттернов: {e}")
+        return []
+
 def update_moderation_entry(conn, entry_id, new_rating, new_comment, new_tag):
     if not conn: return False
     try:
@@ -646,6 +686,449 @@ def delete_block_by_name(conn, name):
         conn.rollback()
         return False
 
+# --- Функции для слияния паттернов ---
+
+def find_next_merge_candidate_group(conn, already_seen_ids=None):
+    """
+    Находит ОДНУ группу кандидатов для слияния, используя оптимизированный SQL.
+    Пропускает паттерны, которые уже были объединены или пропущены в этой сессии.
+    """
+    if not conn: return None
+    if already_seen_ids is None: already_seen_ids = []
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT max(phrase_length) FROM unique_patterns;")
+            max_len = cur.fetchone()[0]
+            if not max_len: return None
+
+            # Иерархия поиска: tag -> pos -> dep
+            for diff_name in ['tag', 'pos', 'dep']:
+                for length in range(1, max_len + 1):
+                    for i in range(length):
+                        if diff_name == 'dep': part_index = i + 1
+                        elif diff_name == 'pos': part_index = length + i + 1
+                        else: part_index = length * 2 + i + 1
+
+                        all_parts = list(range(1, length * 3 + 1))
+                        if part_index in all_parts: all_parts.remove(part_index)
+                        if not all_parts: continue
+
+                        signature_parts = [f"split_part(pattern_text, '_', {j})" for j in all_parts]
+                        signature_sql = " || '_' || ".join(signature_parts)
+                        
+                        # ID паттернов, которые нужно исключить из поиска
+                        exclude_ids_sql = "AND id NOT IN %s" if already_seen_ids else ""
+                        params = (tuple(already_seen_ids),) if already_seen_ids else ()
+
+                        query = f"""
+                            WITH candidate_groups AS (
+                                SELECT 
+                                    {signature_sql} as signature,
+                                    array_agg(id) as pattern_ids,
+                                    SUM(total_frequency) as group_frequency
+                                FROM public.unique_patterns
+                                WHERE phrase_length = {length} {exclude_ids_sql}
+                                GROUP BY {signature_sql}
+                                HAVING count(id) > 1
+                            )
+                            SELECT pattern_ids
+                            FROM candidate_groups
+                            ORDER BY group_frequency DESC
+                            LIMIT 1;
+                        """
+                        
+                        cur.execute(query, params)
+                        result = cur.fetchone()
+
+                        if result and result[0]:
+                            return {
+                                "pattern_ids": result[0],
+                                "difference_type": diff_name,
+                                "difference_position": i + 1
+                            }
+            return None # Ничего не найдено
+    except Exception as e:
+        print(f"Ошибка при поиске кандидатов на слияние: {e}")
+        conn.rollback()
+        return None
+
+def get_patterns_data_by_ids(conn, pattern_ids):
+    """Получает подробные данные для списка ID паттернов."""
+    if not conn or not pattern_ids: return []
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT 
+                    up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
+                    (
+                        SELECT jsonb_agg(jsonb_build_object('text', pe.example_text, 'freq', pe.example_frequency) ORDER BY pe.example_frequency DESC)
+                        FROM (
+                            SELECT example_text, example_frequency
+                            FROM pattern_examples
+                            WHERE pattern_id = up.id
+                            ORDER BY example_frequency DESC
+                            LIMIT 50
+                        ) pe
+                    ) as examples
+                FROM unique_patterns up
+                WHERE up.id = ANY(%s)
+                ORDER BY up.total_frequency DESC;
+            """
+            cur.execute(query, (pattern_ids,))
+            results = []
+            for row in cur.fetchall():
+                results.append({
+                    "id": row[0],
+                    "text": row[1],
+                    "len": row[2],
+                    "freq": row[3],
+                    "qty": row[4],
+                    "examples": row[5] or []
+                })
+            return results
+    except Exception as e:
+        print(f"Ошибка при получении данных паттернов: {e}")
+        return []
+
+def execute_pattern_merge(conn, source_pattern_ids, target_pattern_id):
+    """
+    Выполняет деструктивное слияние паттернов.
+    Эта функция предназначена для выполнения ОДНОЙ операции слияния.
+    Предполагается, что она будет вызвана внутри другой функции, управляющей транзакцией.
+    """
+    if not conn or not source_pattern_ids or not target_pattern_id:
+        return False, "Неверные входные данные."
+
+    with conn.cursor() as cur:
+        # Шаг 1: Получить данные целевого паттерна
+        cur.execute("SELECT deps, pos, tags, lemmas, tokens, morph FROM ngrams WHERE pattern_id = %s LIMIT 1;", (target_pattern_id,))
+        target_data = cur.fetchone()
+        if not target_data:
+            raise Exception(f"Не удалось найти данные для целевого паттерна ID {target_pattern_id}.")
+        
+        target_deps, target_pos, target_tags, target_lemmas, target_tokens, target_morph = target_data
+
+        # Шаг 2: Обновить n-граммы
+        update_query = """
+            UPDATE ngrams SET
+                pattern_id = %s, deps = %s, pos = %s, tags = %s,
+                lemmas = %s, tokens = %s, morph = %s
+            WHERE pattern_id = ANY(%s);
+        """
+        cur.execute(update_query, (
+            target_pattern_id, 
+            json.dumps(target_deps), json.dumps(target_pos), json.dumps(target_tags),
+            json.dumps(target_lemmas), json.dumps(target_tokens), json.dumps(target_morph), 
+            source_pattern_ids
+        ))
+        
+        # Шаг 3: Удалить исходные паттерны (каскадное удаление позаботится об остальном)
+        cur.execute("DELETE FROM unique_patterns WHERE id = ANY(%s);", (source_pattern_ids,))
+
+    return True, f"Слиты {source_pattern_ids} в {target_pattern_id}."
+
+# --- Функции для слияния паттернов ---
+
+def mark_patterns_as_merged(conn, pattern_ids):
+    """Устанавливает флаг merged = TRUE для списка ID паттернов."""
+    if not conn or not pattern_ids:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE unique_patterns SET merged = TRUE WHERE id = ANY(%s);", (pattern_ids,))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при установке флага merged: {e}")
+        conn.rollback()
+        return False
+
+def find_next_merge_candidate_group(conn, length):
+    """
+    Находит ОДНУ группу кандидатов для слияния для ЗАДАННОЙ ДЛИНЫ, используя оптимизированный SQL.
+    Ищет только среди паттернов, где merged = FALSE.
+    """
+    if not conn: return None
+
+    try:
+        with conn.cursor() as cur:
+            # Иерархия поиска: tag -> pos -> dep
+            for diff_name in ['tag', 'pos', 'dep']:
+                for i in range(length):
+                    if diff_name == 'dep': part_index = i + 1
+                    elif diff_name == 'pos': part_index = length + i + 1
+                    else: part_index = length * 2 + i + 1
+
+                    all_parts = list(range(1, length * 3 + 1))
+                    if part_index in all_parts: all_parts.remove(part_index)
+                    if not all_parts: continue
+
+                    signature_parts = [f"split_part(pattern_text, '_', {j})" for j in all_parts]
+                    signature_sql = " || '_' || ".join(signature_parts)
+                    
+                    query = f"""
+                        WITH candidate_groups AS (
+                            SELECT 
+                                {signature_sql} as signature,
+                                array_agg(id) as pattern_ids,
+                                SUM(total_frequency) as group_frequency
+                            FROM public.unique_patterns
+                            WHERE phrase_length = {length} AND merged = FALSE
+                            GROUP BY {signature_sql}
+                            HAVING count(id) > 1
+                        )
+                        SELECT pattern_ids
+                        FROM candidate_groups
+                        ORDER BY group_frequency DESC
+                        LIMIT 1;
+                    """
+                    
+                    cur.execute(query)
+                    result = cur.fetchone()
+
+                    if result and result[0]:
+                        return {
+                            "pattern_ids": result[0],
+                            "difference_type": diff_name,
+                            "difference_position": i + 1
+                        }
+            return None # Ничего не найдено
+    except Exception as e:
+        print(f"Ошибка при поиске кандидатов на слияние: {e}")
+        conn.rollback()
+        return None
+
+def get_available_lengths_for_merging(conn):
+    """Получает список длин, для которых есть необработанные паттерны."""
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT phrase_length FROM unique_patterns WHERE merged = FALSE ORDER BY phrase_length;")
+            return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка при получении доступных длин: {e}")
+        return []
+
+def get_patterns_data_by_ids(conn, pattern_ids):
+    """Получает подробные данные для списка ID паттернов."""
+    if not conn or not pattern_ids: return []
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT 
+                    up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
+                    (
+                        SELECT jsonb_agg(jsonb_build_object('text', pe.example_text, 'freq', pe.example_frequency) ORDER BY pe.example_frequency DESC)
+                        FROM (
+                            SELECT example_text, example_frequency
+                            FROM pattern_examples
+                            WHERE pattern_id = up.id
+                            ORDER BY example_frequency DESC
+                            LIMIT 50
+                        ) pe
+                    ) as examples
+                FROM unique_patterns up
+                WHERE up.id = ANY(%s)
+                ORDER BY up.total_frequency DESC;
+            """
+            cur.execute(query, (pattern_ids,))
+            results = []
+            for row in cur.fetchall():
+                results.append({
+                    "id": row[0],
+                    "text": row[1],
+                    "len": row[2],
+                    "freq": row[3],
+                    "qty": row[4],
+                    "examples": row[5] or []
+                })
+            return results
+    except Exception as e:
+        print(f"Ошибка при получении данных паттернов: {e}")
+        return []
+
+def execute_multiple_merges(conn, merges):
+    """
+    Выполняет список операций слияния в одной транзакции.
+    merges: список словарей, каждый вида {'sources': [...], 'target': ...}
+    """
+    if not conn or not merges: 
+        return False, "Нет данных для выполнения."
+
+    all_target_ids = [op['target'] for op in merges]
+    all_source_ids = [sid for op in merges for sid in op['sources']]
+
+    try:
+        with conn.cursor() as cur:
+            # Явно начинаем транзакцию
+            print("Начало транзакции для множественного слияния...")
+            
+            for merge_op in merges:
+                source_ids = merge_op.get('sources')
+                target_id = merge_op.get('target')
+                print(f"  - Выполнение слияния: {source_ids} -> {target_id}")
+                
+                # Выполняем обновление n-грамм
+                cur.execute("SELECT deps, pos, tags, lemmas, tokens, morph FROM ngrams WHERE pattern_id = %s LIMIT 1;", (target_id,))
+                target_data = cur.fetchone()
+                if not target_data:
+                    raise Exception(f"Не найдены n-граммы для целевого паттерна ID {target_id}.")
+                target_deps, target_pos, target_tags, target_lemmas, target_tokens, target_morph = target_data
+                
+                update_query = """
+                    UPDATE ngrams SET
+                        pattern_id = %s, deps = %s, pos = %s, tags = %s,
+                        lemmas = %s, tokens = %s, morph = %s
+                    WHERE pattern_id = ANY(%s);
+                """
+                cur.execute(update_query, (
+                    target_id, 
+                    json.dumps(target_deps), json.dumps(target_pos), json.dumps(target_tags),
+                    json.dumps(target_lemmas), json.dumps(target_tokens), json.dumps(target_morph), 
+                    source_ids
+                ))
+
+                # Удаляем исходные паттерны
+                cur.execute("DELETE FROM unique_patterns WHERE id = ANY(%s);", (source_ids,))
+
+            # Пересчитываем статистику для всех затронутых целевых паттернов
+            print(f"  - Пересчет статистики для целевых паттернов: {all_target_ids}")
+            cur.execute("""
+                UPDATE unique_patterns up
+                SET 
+                    total_frequency = agg.total_freq,
+                    total_quantity = agg.total_qty
+                FROM (
+                    SELECT pattern_id, SUM(freq_mln) as total_freq, COUNT(id) as total_qty
+                    FROM ngrams
+                    WHERE pattern_id = ANY(%s)
+                    GROUP BY pattern_id
+                ) as agg
+                WHERE up.id = agg.pattern_id;
+            """, (all_target_ids,))
+
+            # Помечаем целевые паттерны как обработанные
+            print(f"  - Пометка целевых паттернов как обработанных: {all_target_ids}")
+            cur.execute("UPDATE unique_patterns SET merged = TRUE WHERE id = ANY(%s);", (all_target_ids,))
+
+            conn.commit()
+            print("Транзакция успешно закоммичена.")
+            return True, "Все слияния успешно выполнены."
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Критическая ошибка во время множественного слияния: {e}")
+        return False, str(e)
+
+
+# --- Функции для управления темами паттернов ---
+def create_theme(conn, name, description=None, parent_theme_id=None):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO pattern_themes (name, description, parent_theme_id) VALUES (%s, %s, %s) RETURNING id;", (name, description, parent_theme_id))
+            theme_id = cur.fetchone()[0]
+            conn.commit()
+            return theme_id
+    except Exception as e:
+        print(f"Ошибка при создании темы: {e}")
+        conn.rollback()
+        return False
+
+def get_all_themes(conn):
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, description, parent_theme_id FROM pattern_themes ORDER BY name;")
+            return [{"id": r[0], "name": r[1], "description": r[2], "parent_theme_id": r[3]} for r in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка при получении всех тем: {e}")
+        return []
+
+def get_theme_by_id(conn, theme_id):
+    if not conn: return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, description, parent_theme_id FROM pattern_themes WHERE id = %s;", (theme_id,))
+            r = cur.fetchone()
+            if r:
+                return {"id": r[0], "name": r[1], "description": r[2], "parent_theme_id": r[3]}
+            return None
+    except Exception as e:
+        print(f"Ошибка при получении темы по ID: {e}")
+        return None
+
+def update_theme(conn, theme_id, name, description, parent_theme_id):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE pattern_themes SET name = %s, description = %s, parent_theme_id = %s WHERE id = %s;", (name, description, parent_theme_id, theme_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при обновлении темы: {e}")
+        conn.rollback()
+        return False
+
+def delete_theme(conn, theme_id):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pattern_themes WHERE id = %s;", (theme_id,))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при удалении темы: {e}")
+        conn.rollback()
+        return False
+
+# --- Функции для связывания паттернов с темами ---
+def associate_pattern_with_theme(conn, pattern_id, theme_id):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO pattern_theme_associations (pattern_id, theme_id) VALUES (%s, %s) ON CONFLICT (pattern_id, theme_id) DO NOTHING;", (pattern_id, theme_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при связывании паттерна с темой: {e}")
+        conn.rollback()
+        return False
+
+def get_themes_for_pattern(conn, pattern_id):
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pt.id, pt.name FROM pattern_themes pt JOIN pattern_theme_associations pta ON pt.id = pta.theme_id WHERE pta.pattern_id = %s ORDER BY pt.name;", (pattern_id,))
+            return [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка при получении тем для паттерна: {e}")
+        return []
+
+def get_patterns_for_theme(conn, theme_id):
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT up.id, up.pattern_text FROM unique_patterns up JOIN pattern_theme_associations pta ON up.id = pta.pattern_id WHERE pta.theme_id = %s ORDER BY up.pattern_text;", (theme_id,))
+            return [{"id": r[0], "text": r[1]} for r in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка при получении паттернов для темы: {e}")
+        return []
+
+def remove_pattern_from_theme(conn, pattern_id, theme_id):
+    if not conn: return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pattern_theme_associations WHERE pattern_id = %s AND theme_id = %s;", (pattern_id, theme_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при удалении паттерна из темы: {e}")
+        conn.rollback()
+        return False
+
+
 # --- Построение SQL ---
 def build_where_clauses(blocks, block_id_to_skip=None, rule_id_to_skip=None, table_name="ngrams"):
     where_clauses = []
@@ -667,19 +1150,20 @@ def build_where_clauses(blocks, block_id_to_skip=None, rule_id_to_skip=None, tab
 
             if db_col_type == 'morph':
                 # For morph, which is an array of arrays.
-                conditions = ' OR '.join([f"{table_name}.morph->{position} @> '[\"{v}\"]'::jsonb" for v in values])
+                # Escape double quotes in values to prevent errors.
+                safe_values = [str(v).replace('"', '\\"') for v in values]
+                conditions = ' OR '.join([f"{table_name}.morph->{position} @> '[\"{v}\"]'::jsonb" for v in safe_values])
                 rule_logic = f"({conditions})"
             else:
-                # For simple arrays (dep, pos, tag, etc.)
-                # Use @> for index-based pre-filtering, then an exact positional check.
-                containment_conditions = ' OR '.join([f"{table_name}.{db_col_type} @> '[\"{v}\"]'::jsonb" for v in values])
-                positional_values = ", ".join([f"'{v}'" for v in values])
-                positional_check = f"{table_name}.{db_col_type}->>{position} IN ({positional_values})"
-                rule_logic = f"(({containment_conditions}) AND {positional_check})"
+                # For simple arrays (dep, pos, tag, token, lemma).
+                # Escape single quotes in values to prevent SQL errors.
+                safe_values = [str(v).replace("'", "''") for v in values]
+                positional_values = ", ".join([f"'{v}'" for v in safe_values])
+                rule_logic = f"{table_name}.{db_col_type}->>{position} IN ({positional_values})"
 
             # Apply operator
             if operator == 'exclude':
-                block_rules.append(f"({length_check} AND NOT {rule_logic})")
+                block_rules.append(f"({length_check} AND NOT ({rule_logic}))")
             else: # include
                 block_rules.append(f"({length_check} AND {rule_logic})")
 

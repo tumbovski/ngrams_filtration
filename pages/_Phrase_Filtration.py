@@ -623,7 +623,7 @@ def _run_query():
         st.session_state.last_query = ""
         return
 
-    table_to_use = st.session_state.get("temp_table_name", "ngrams")
+    table_to_use = st.session_state.get("temp_table_name") or "ngrams"
     where_clauses = build_where_clauses(st.session_state.filter_blocks, table_name=table_to_use)
 
     # Add min_frequency filter

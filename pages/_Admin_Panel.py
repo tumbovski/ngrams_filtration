@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 from core.database import get_db_connection, get_all_moderators, update_user_status, update_user_details, add_user
 import bcrypt
 
@@ -14,8 +15,6 @@ st.title("Панель администратора")
 
 st.subheader("Управление модераторами")
 
-import pandas as pd
-
 def refresh_moderators():
     data = get_all_moderators(conn)
     st.session_state.moderators = pd.DataFrame(data) if data else pd.DataFrame()
@@ -24,8 +23,6 @@ if 'moderators' not in st.session_state:
     refresh_moderators()
 
 if not st.session_state.moderators.empty:
-    
-
     edited_df = st.data_editor(
         st.session_state.moderators,
         key="moderators_table",
@@ -41,7 +38,6 @@ if not st.session_state.moderators.empty:
         use_container_width=True
     )
 
-    import pandas as pd
     if not isinstance(st.session_state.moderators, pd.DataFrame):
         st.session_state.moderators = pd.DataFrame(st.session_state.moderators)
     if edited_df.equals(st.session_state.moderators):

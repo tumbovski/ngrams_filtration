@@ -1165,111 +1165,7 @@ def execute_multiple_merges(conn, merges):
         return False, str(e)
 
 
-# --- Функции для управления темами паттернов ---
-def create_theme(conn, name, description=None, parent_theme_id=None):
-    if not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO pattern_themes (name, description, parent_theme_id) VALUES (%s, %s, %s) RETURNING id;", (name, description, parent_theme_id))
-            theme_id = cur.fetchone()[0]
-            conn.commit()
-            return theme_id
-    except Exception as e:
-        print(f"Ошибка при создании темы: {e}")
-        conn.rollback()
-        return False
 
-def get_all_themes(conn):
-    if not conn: return []
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, name, description, parent_theme_id FROM pattern_themes ORDER BY name;")
-            return [{"id": r[0], "name": r[1], "description": r[2], "parent_theme_id": r[3]} for r in cur.fetchall()]
-    except Exception as e:
-        print(f"Ошибка при получении всех тем: {e}")
-        return []
-
-def get_theme_by_id(conn, theme_id):
-    if not conn: return None
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, name, description, parent_theme_id FROM pattern_themes WHERE id = %s;", (theme_id,))
-            r = cur.fetchone()
-            if r:
-                return {"id": r[0], "name": r[1], "description": r[2], "parent_theme_id": r[3]}
-            return None
-    except Exception as e:
-        print(f"Ошибка при получении темы по ID: {e}")
-        return None
-
-def update_theme(conn, theme_id, name, description, parent_theme_id):
-    if not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE pattern_themes SET name = %s, description = %s, parent_theme_id = %s WHERE id = %s;", (name, description, parent_theme_id, theme_id))
-            conn.commit()
-            return True
-    except Exception as e:
-        print(f"Ошибка при обновлении темы: {e}")
-        conn.rollback()
-        return False
-
-def delete_theme(conn, theme_id):
-    if not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM pattern_themes WHERE id = %s;", (theme_id,))
-            conn.commit()
-            return True
-    except Exception as e:
-        print(f"Ошибка при удалении темы: {e}")
-        conn.rollback()
-        return False
-
-# --- Функции для связывания паттернов с темами ---
-def associate_pattern_with_theme(conn, pattern_id, theme_id):
-    if not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO pattern_theme_associations (pattern_id, theme_id) VALUES (%s, %s) ON CONFLICT (pattern_id, theme_id) DO NOTHING;", (pattern_id, theme_id))
-            conn.commit()
-            return True
-    except Exception as e:
-        print(f"Ошибка при связывании паттерна с темой: {e}")
-        conn.rollback()
-        return False
-
-def get_themes_for_pattern(conn, pattern_id):
-    if not conn: return []
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT pt.id, pt.name FROM pattern_themes pt JOIN pattern_theme_associations pta ON pt.id = pta.theme_id WHERE pta.pattern_id = %s ORDER BY pt.name;", (pattern_id,))
-            return [{"id": r[0], "name": r[1]} for r in cur.fetchall()]
-    except Exception as e:
-        print(f"Ошибка при получении тем для паттерна: {e}")
-        return []
-
-def get_patterns_for_theme(conn, theme_id):
-    if not conn: return []
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT up.id, up.pattern_text FROM unique_patterns up JOIN pattern_theme_associations pta ON up.id = pta.pattern_id WHERE pta.theme_id = %s ORDER BY up.pattern_text;", (theme_id,))
-            return [{"id": r[0], "text": r[1]} for r in cur.fetchall()]
-    except Exception as e:
-        print(f"Ошибка при получении паттернов для темы: {e}")
-        return []
-
-def remove_pattern_from_theme(conn, pattern_id, theme_id):
-    if not conn: return False
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM pattern_theme_associations WHERE pattern_id = %s AND theme_id = %s;", (pattern_id, theme_id))
-            conn.commit()
-            return True
-    except Exception as e:
-        print(f"Ошибка при удалении паттерна из темы: {e}")
-        conn.rollback()
-        return False
 
 
 # --- Построение SQL ---
@@ -1323,4 +1219,52 @@ def execute_query(conn, query):
             return cur.fetchall()
     except Exception as e:
         print(f"Ошибка выполнения запроса: {e}")
+        return []
+
+# --- Функции для работы с категориями паттернов ---
+
+def get_category_tree(conn):
+    """
+    Загружает все категории и строит из них иерархическое дерево.
+    """
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, description, parent_category_id FROM public.pattern_categories ORDER BY name")
+            all_categories = cur.fetchall()
+            
+            cat_map = {cat[0]: {"id": cat[0], "name": cat[1], "description": cat[2], "parent_id": cat[3], "children": []} for cat in all_categories}
+            
+            tree = []
+            for cat_id, cat_data in cat_map.items():
+                if cat_data["parent_id"] is None:
+                    tree.append(cat_data)
+                else:
+                    parent = cat_map.get(cat_data["parent_id"])
+                    if parent:
+                        parent["children"].append(cat_data)
+            return tree
+    except Exception as e:
+        print(f"Ошибка при построении дерева категорий: {e}")
+        return []
+
+def get_patterns_for_category(conn, category_id):
+    """
+    Получает все паттерны, связанные с определенной категорией.
+    """
+    if not conn or not category_id:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT up.id, up.pattern_text, up.total_frequency, up.total_quantity
+                FROM public.unique_patterns up
+                JOIN public.pattern_category_associations pca ON up.id = pca.pattern_id
+                WHERE pca.category_id = %s
+                ORDER BY up.total_frequency DESC;
+            """, (category_id,))
+            return [{"id": row[0], "text": row[1], "freq": row[2], "qty": row[3]} for row in cur.fetchall()]
+    except Exception as e:
+        print(f"Ошибка при получении паттернов для категории {category_id}: {e}")
         return []

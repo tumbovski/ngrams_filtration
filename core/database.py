@@ -844,60 +844,203 @@ def mark_patterns_as_merged(conn, pattern_ids):
         conn.rollback()
         return False
 
+def mark_patterns_as_skipped(conn, pattern_ids, diff_level, diff_types):
+    """
+    Помечает группу паттернов как пропущенную (отмодерированную).
+    Устанавливает флаги для соответствующих типов различий (dep, pos, tag)
+    и уровень различий, на котором было принято решение.
+    """
+    if not conn or not pattern_ids or not diff_types:
+        return False
+    try:
+        with conn.cursor() as cur:
+            update_parts = [f"moderated_{t} = TRUE" for t in diff_types]
+            update_parts.append(f"moderation_diff_level = {diff_level}")
+            
+            query = f"""
+                UPDATE unique_patterns 
+                SET {', '.join(update_parts)} 
+                WHERE id = ANY(%s);
+            """
+            cur.execute(query, (pattern_ids,))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Ошибка при пометке паттернов как пропущенных: {e}")
+        conn.rollback()
+        return False
+
 def find_next_merge_candidate_group(conn, length):
     """
-    Находит ОДНУ группу кандидатов для слияния для ЗАДАННОЙ ДЛИНЫ, используя оптимизированный SQL.
-    Ищет только среди паттернов, где merged = FALSE.
+    Находит следующую группу кандидатов для слияния для ЗАДАННОЙ ДЛИНЫ.
+    Иерархия поиска:
+    1. Сначала ищет группы с 1 отличием (tag -> pos -> dep).
+    2. Если не найдено, ищет группы с 2 отличиями.
+    3. Если не найдено, ищет группы с 3 отличиями.
+    Учитывает новые флаги модерации (moderated_dep, moderated_pos, moderated_tag).
     """
     if not conn: return None
 
-    try:
-        with conn.cursor() as cur:
-            # Иерархия поиска: tag -> pos -> dep
-            for diff_name in ['tag', 'pos', 'dep']:
-                for i in range(length):
-                    if diff_name == 'dep': part_index = i + 1
-                    elif diff_name == 'pos': part_index = length + i + 1
-                    else: part_index = length * 2 + i + 1
+    # --- Вспомогательная функция для выполнения поиска ---
+    def find_group_with_n_diffs(n_diffs):
+        import itertools
+        
+        # Генерируем все возможные комбинации позиций для заданного числа различий
+        all_possible_indices = range(1, length * 3 + 1)
+        index_combinations = itertools.combinations(all_possible_indices, n_diffs)
 
-                    all_parts = list(range(1, length * 3 + 1))
-                    if part_index in all_parts: all_parts.remove(part_index)
-                    if not all_parts: continue
+        for combo in index_combinations:
+            diff_indices = list(combo)
+            
+            # Определяем типы (dep, pos, tag) для текущих позиций с различиями
+            diff_types = set()
+            for index in diff_indices:
+                if 1 <= index <= length:
+                    diff_types.add('dep')
+                elif length < index <= length * 2:
+                    diff_types.add('pos')
+                else:
+                    diff_types.add('tag')
+            
+            # Формируем WHERE clause для проверки, не были ли паттерны уже отмодерированы по этим типам
+            where_moderated = " AND ".join([f"moderated_{t} = FALSE" for t in diff_types])
 
-                    signature_parts = [f"split_part(pattern_text, '_', {j})" for j in all_parts]
-                    signature_sql = " || '_' || ".join(signature_parts)
-                    
-                    query = f"""
-                        WITH candidate_groups AS (
-                            SELECT 
-                                {signature_sql} as signature,
-                                array_agg(id) as pattern_ids,
-                                SUM(total_frequency) as group_frequency
-                            FROM public.unique_patterns
-                            WHERE phrase_length = {length} AND merged = FALSE
-                            GROUP BY {signature_sql}
-                            HAVING count(id) > 1
-                        )
-                        SELECT pattern_ids
-                        FROM candidate_groups
-                        ORDER BY group_frequency DESC
-                        LIMIT 1;
-                    """
-                    
+            # Формируем сигнатуру для группировки (все части, КРОМЕ различающихся)
+            signature_indices = [i for i in all_possible_indices if i not in diff_indices]
+            if not signature_indices: continue # Не может быть 0 общих частей
+
+            signature_sql = " || '_' || ".join([f"split_part(pattern_text, '_', {j})" for j in signature_indices])
+
+            query = f"""
+                WITH candidate_groups AS (
+                    SELECT 
+                        {signature_sql} as signature,
+                        array_agg(id) as pattern_ids,
+                        SUM(total_frequency) as group_frequency
+                    FROM public.unique_patterns
+                    WHERE phrase_length = {length} AND ({where_moderated})
+                    GROUP BY signature
+                    HAVING count(id) > 1
+                )
+                SELECT pattern_ids
+                FROM candidate_groups
+                ORDER BY group_frequency DESC
+                LIMIT 1;
+            """
+            
+            try:
+                with conn.cursor() as cur:
                     cur.execute(query)
                     result = cur.fetchone()
-
                     if result and result[0]:
                         return {
                             "pattern_ids": result[0],
-                            "difference_type": diff_name,
-                            "difference_position": i + 1
+                            "difference_level": n_diffs,
+                            "difference_types": list(diff_types)
                         }
-            return None # Ничего не найдено
+            except Exception as e:
+                print(f"Ошибка при поиске кандидатов с {n_diffs} различиями: {e}")
+                conn.rollback()
+                # Продолжаем поиск со следующей комбинацией
+    
+    # --- Основная логика поиска ---
+    for n in range(1, 4): # Ищем сначала с 1, потом 2, потом 3 отличиями
+        print(f"Поиск кандидатов с {n} отличиями для длины {length}...")
+        found_group = find_group_with_n_diffs(n)
+        if found_group:
+            return found_group
+            
+    return None # Ничего не найдено
+
+def get_available_lengths_for_merging(conn):
+    """Получает список длин, для которых есть необработанные паттерны."""
+    if not conn: return []
+    try:
+        with conn.cursor() as cur:
+            # Паттерн считается необработанным, если хотя бы один из флагов модерации FALSE
+            cur.execute("""
+                SELECT DISTINCT phrase_length 
+                FROM unique_patterns 
+                WHERE moderated_dep = FALSE OR moderated_pos = FALSE OR moderated_tag = FALSE
+                ORDER BY phrase_length;
+            """)
+            return [row[0] for row in cur.fetchall()]
     except Exception as e:
-        print(f"Ошибка при поиске кандидатов на слияние: {e}")
+        print(f"Ошибка при получении доступных длин: {e}")
+        return []
+
+def execute_multiple_merges(conn, merges):
+    """
+    Выполняет список операций слияния в одной транзакции.
+    Обновлено для работы с новой схемой модерации.
+    """
+    if not conn or not merges: 
+        return False, "Нет данных для выполнения."
+
+    all_target_ids = [op['target'] for op in merges]
+    
+    try:
+        with conn.cursor() as cur:
+            print("Начало транзакции для множественного слияния...")
+            
+            for merge_op in merges:
+                source_ids = merge_op.get('sources')
+                target_id = merge_op.get('target')
+                print(f"  - Выполнение слияния: {source_ids} -> {target_id}")
+                
+                cur.execute("SELECT deps, pos, tags, lemmas, tokens, morph FROM ngrams WHERE pattern_id = %s LIMIT 1;", (target_id,))
+                target_data = cur.fetchone()
+                if not target_data:
+                    raise Exception(f"Не найдены n-граммы для целевого паттерна ID {target_id}.")
+                target_deps, target_pos, target_tags, target_lemmas, target_tokens, target_morph = target_data
+                
+                update_query = """
+                    UPDATE ngrams SET
+                        pattern_id = %s, deps = %s, pos = %s, tags = %s,
+                        lemmas = %s, tokens = %s, morph = %s
+                    WHERE pattern_id = ANY(%s);
+                """
+                cur.execute(update_query, (
+                    target_id, 
+                    json.dumps(target_deps), json.dumps(target_pos), json.dumps(target_tags),
+                    json.dumps(target_lemmas), json.dumps(target_tokens), json.dumps(target_morph), 
+                    source_ids
+                ))
+
+                cur.execute("DELETE FROM unique_patterns WHERE id = ANY(%s);", (source_ids,))
+
+            print(f"  - Пересчет статистики для целевых паттернов: {all_target_ids}")
+            cur.execute("""
+                UPDATE unique_patterns up
+                SET 
+                    total_frequency = agg.total_freq,
+                    total_quantity = agg.total_qty
+                FROM (
+                    SELECT pattern_id, SUM(freq_mln) as total_freq, COUNT(id) as total_qty
+                    FROM ngrams
+                    WHERE pattern_id = ANY(%s)
+                    GROUP BY pattern_id
+                ) as agg
+                WHERE up.id = agg.pattern_id;
+            """, (all_target_ids,))
+
+            # После успешного слияния и пересчета, помечаем целевой паттерн как полностью отмодерированный
+            print(f"  - Пометка целевых паттернов как полностью обработанных: {all_target_ids}")
+            cur.execute("""
+                UPDATE unique_patterns 
+                SET moderated_dep = TRUE, moderated_pos = TRUE, moderated_tag = TRUE, moderation_diff_level = 0
+                WHERE id = ANY(%s);
+            """, (all_target_ids,))
+
+            conn.commit()
+            print("Транзакция успешно закоммичена.")
+            return True, "Все слияния успешно выполнены."
+
+    except Exception as e:
         conn.rollback()
-        return None
+        print(f"Критическая ошибка во время множественного слияния: {e}")
+        return False, str(e)
+
 
 def get_available_lengths_for_merging(conn):
     """Получает список длин, для которых есть необработанные паттерны."""

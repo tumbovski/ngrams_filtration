@@ -19,16 +19,23 @@ def get_patterns_by_relaxed_sig(relaxed_sig, limit=5):
         return []
     try:
         query = """
-            SELECT id, pattern_text, phrase_length, total_frequency, total_quantity
-            FROM unique_patterns
-            WHERE relaxed_signature = %s
-            ORDER BY total_frequency DESC
+            SELECT 
+                up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
+                (
+                    SELECT array_agg(pc.name ORDER BY pc.name)
+                    FROM pattern_category_associations pca
+                    JOIN pattern_categories pc ON pca.category_id = pc.id
+                    WHERE pca.pattern_id = up.id
+                ) as categories
+            FROM unique_patterns up
+            WHERE up.relaxed_signature = %s
+            ORDER BY up.total_frequency DESC
             LIMIT %s;
         """
         with conn.cursor() as cur:
             cur.execute(query, (relaxed_sig, limit))
             patterns = cur.fetchall()
-            return [{"id": p[0], "text": p[1], "len": p[2], "freq": p[3], "qty": p[4]} for p in patterns]
+            return [{"id": p[0], "text": p[1], "len": p[2], "freq": p[3], "qty": p[4], "categories": p[5] or []} for p in patterns]
     except Exception as e:
         st.error(f"Error fetching patterns for signature {relaxed_sig}: {e}")
         return []
@@ -128,7 +135,16 @@ def generate_graphviz_chart(parent_label, child_relations):
 
 def display_deconstruction(pattern_id):
     """The main display logic for a given pattern ID, fetching data on-demand."""
-    parent_info_query = "SELECT pattern_text, phrase_length, total_frequency, total_quantity FROM unique_patterns WHERE id = %s"
+    parent_info_query = """
+        SELECT 
+            up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
+            (
+                SELECT array_agg(pc.name ORDER BY pc.name)
+                FROM pattern_category_associations pca
+                JOIN pattern_categories pc ON pca.category_id = pc.id
+                WHERE pca.pattern_id = up.id
+            ) as categories
+        FROM unique_patterns up WHERE id = %s"""
     conn = get_db_connection()
     if not conn: return
     try:
@@ -148,6 +164,11 @@ def display_deconstruction(pattern_id):
 
     st.subheader(f"Паттерн: {pattern_signature_only}")
     st.markdown(f"<p style='font-size: medium;'>{id_and_stats}</p>", unsafe_allow_html=True)
+    
+    # Отображаем категории родительского паттерна
+    if parent_info['categories']:
+        categories_str = ", ".join(parent_info['categories'])
+        st.markdown(f"**Категории:** {categories_str}")
     
     parent_examples = get_pattern_examples(pattern_id)
     if parent_examples:
@@ -190,6 +211,10 @@ def display_deconstruction(pattern_id):
                     for pattern in matching_patterns1[:5]:
                         relaxed_child_text = get_relaxed_signature(pattern['text'], pattern['len'])
                         with st.expander(f"(ID: {pattern['id']}) {relaxed_child_text} (F: {pattern['freq']:,.2f}, Q: {pattern['qty']:,})".replace(',',' ')):
+                            if pattern.get('categories'):
+                                categories_str = ", ".join(pattern['categories'])
+                                st.markdown(f"**Категории:** {categories_str}")
+
                             st.markdown("**Примеры фраз:**")
                             examples = get_pattern_examples(pattern['id'])
                             if examples:
@@ -207,6 +232,10 @@ def display_deconstruction(pattern_id):
                     for pattern in matching_patterns2[:5]:
                         relaxed_child_text = get_relaxed_signature(pattern['text'], pattern['len'])
                         with st.expander(f"(ID: {pattern['id']}) {relaxed_child_text} (F: {pattern['freq']:,.2f}, Q: {pattern['qty']:,})".replace(',',' ')):
+                            if pattern.get('categories'):
+                                categories_str = ", ".join(pattern['categories'])
+                                st.markdown(f"**Категории:** {categories_str}")
+
                             st.markdown("**Примеры фраз:**")
                             examples = get_pattern_examples(pattern['id'])
                             if examples:

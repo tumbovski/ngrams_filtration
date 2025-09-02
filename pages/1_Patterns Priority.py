@@ -173,6 +173,10 @@ with moderation_details_col:
         st.write(f"**Паттерн:** `{pattern['pattern_text']}`")
         st.markdown(f"**ID:** {pattern['id']} | **F:** {format_number_with_spaces(pattern['total_frequency'])} | **Q:** {format_number_with_spaces(pattern['total_quantity'])}")
 
+        if pattern.get('categories'):
+            categories_str = ", ".join(pattern['categories'])
+            st.markdown(f"**Категории:** {categories_str}")
+
         st.markdown("---")
         
         user_id = st.session_state.user_id

@@ -149,6 +149,11 @@ if st.session_state.selected_length:
                     # --- Конец блока отображения ---
 
                     st.markdown(f"**F:** {p_data['freq']:.2f} | **Q:** {p_data['qty']}")
+
+                    if p_data.get('categories'):
+                        categories_str = ", ".join(p_data['categories'])
+                        st.markdown(f"**Категории:** {categories_str}")
+
                     if p_data['examples']:
                         df_examples = pd.DataFrame(p_data['examples'])
                         df_examples.rename(columns={'text': 'Фраза', 'freq': 'Частотность (ipm)'}, inplace=True)

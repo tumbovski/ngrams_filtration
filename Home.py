@@ -16,6 +16,7 @@ if 'user_login' not in st.session_state: st.session_state.user_login = None
 if 'user_id' not in st.session_state: st.session_state.user_id = None
 
 conn = get_db_connection()
+conn.set_client_encoding("UTF8")
 cookies = CookieManager()
 
 if not cookies.ready():

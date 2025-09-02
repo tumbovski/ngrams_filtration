@@ -40,15 +40,28 @@ def find_constructions_relaxed(source_pattern_id):
     base_query = """
         WITH frequent_partners AS (
             SELECT
-                id, pattern_text, phrase_length, total_frequency, total_quantity, relaxed_signature,
+                id, pattern_text, phrase_length, total_frequency, total_quantity, relaxed_signature, 
+                (
+                    SELECT array_agg(pc.name ORDER BY pc.name)
+                    FROM pattern_category_associations pca
+                    JOIN pattern_categories pc ON pca.category_id = pc.id
+                    WHERE pca.pattern_id = unique_patterns.id
+                ) as categories,
                 ROW_NUMBER() OVER(PARTITION BY relaxed_signature ORDER BY total_frequency DESC) as rn
             FROM unique_patterns
         )
         SELECT
             fp.id as partner_id, fp.pattern_text as partner_text, fp.phrase_length as partner_len,
             fp.total_frequency as partner_freq, fp.total_quantity as partner_qty, fp.relaxed_signature as partner_relaxed_sig,
+            fp.categories as partner_categories,
             up_c.id as result_id, up_c.pattern_text as result_text, up_c.phrase_length as result_len,
             up_c.total_frequency as result_freq, up_c.total_quantity as result_qty, up_c.relaxed_signature as result_relaxed_sig
+            (
+                SELECT array_agg(pc.name ORDER BY pc.name)
+                FROM pattern_category_associations pca
+                JOIN pattern_categories pc ON pca.category_id = pc.id
+                WHERE pca.pattern_id = up_c.id
+            ) as result_categories
         FROM
             pattern_relations_relaxed prr
         JOIN
@@ -74,8 +87,8 @@ def find_constructions_relaxed(source_pattern_id):
             )
             cur.execute(query_before, (source_relaxed_sig,))
             for row in cur.fetchall():
-                partner_b = {"id": row[0], "text": row[1], "len": row[2], "freq": row[3], "qty": row[4], "relaxed_sig": row[5]}
-                pattern_c = {"id": row[6], "text": row[7], "len": row[8], "freq": row[9], "qty": row[10], "relaxed_sig": row[11]}
+                partner_b = {"id": row[0], "text": row[1], "len": row[2], "freq": row[3], "qty": row[4], "relaxed_sig": row[5], "categories": row[6] or []}
+                pattern_c = {"id": row[7], "text": row[8], "len": row[9], "freq": row[10], "qty": row[11], "relaxed_sig": row[12], "categories": row[13] or []}
                 before_results.append({'partner': partner_b, 'result': pattern_c})
 
             # Find patterns that can be glued AFTER (A + B = C)
@@ -85,8 +98,8 @@ def find_constructions_relaxed(source_pattern_id):
             )
             cur.execute(query_after, (source_relaxed_sig,))
             for row in cur.fetchall():
-                partner_b = {"id": row[0], "text": row[1], "len": row[2], "freq": row[3], "qty": row[4], "relaxed_sig": row[5]}
-                pattern_c = {"id": row[6], "text": row[7], "len": row[8], "freq": row[9], "qty": row[10], "relaxed_sig": row[11]}
+                partner_b = {"id": row[0], "text": row[1], "len": row[2], "freq": row[3], "qty": row[4], "relaxed_sig": row[5], "categories": row[6] or []}
+                pattern_c = {"id": row[7], "text": row[8], "len": row[9], "freq": row[10], "qty": row[11], "relaxed_sig": row[12], "categories": row[13] or []}
                 after_results.append({'partner': partner_b, 'result': pattern_c})
     except Exception as e:
         st.error(f"An error occurred while finding constructions: {e}")
@@ -111,6 +124,10 @@ if pattern_id_input:
         st.header(f"Исходный паттерн: {get_relaxed_signature(source_pattern['text'], source_pattern['len'])}")
         st.write(f"(F: {source_pattern['freq']:,.2f}, Q: {source_pattern['qty']:,}; ID: {source_pattern['id']})".replace(',', ' '))
 
+        if source_pattern.get('categories'):
+            categories_str = ", ".join(source_pattern['categories'])
+            st.markdown(f"**Категории:** {categories_str}")
+
         with st.expander("Показать примеры фраз для исходного паттерна"):
             source_examples = get_pattern_examples(source_pattern['id'])
             if source_examples:
@@ -132,7 +149,17 @@ if pattern_id_input:
                 result = item['result']
                 with st.expander(f"Партнер: {get_relaxed_signature(partner['text'], partner['len'])}"):
                     st.markdown(f"**Партнер (Б):** {get_relaxed_signature(partner['text'], partner['len'])} (F: {partner['freq']:,.2f}, Q: {partner['qty']:,})".replace(',', ' '))
+                    
+                    if partner.get('categories'):
+                        categories_str = ", ".join(partner['categories'])
+                        st.markdown(f"**Категории:** {categories_str}")
+
                     st.markdown(f"**Результат (В):** {get_relaxed_signature(result['text'], result['len'])} (F: {result['freq']:,.2f}, Q: {result['qty']:,})".replace(',', ' '))
+                    
+                    if result.get('categories'):
+                        categories_str = ", ".join(result['categories'])
+                        st.markdown(f"**Категории:** {categories_str}")
+
                     st.markdown("**Примеры для результата (В):**")
                     examples = get_pattern_examples(result['id'])
                     if examples:
@@ -148,7 +175,17 @@ if pattern_id_input:
                 result = item['result']
                 with st.expander(f"Партнер: {get_relaxed_signature(partner['text'], partner['len'])}"):
                     st.markdown(f"**Партнер (Б):** {get_relaxed_signature(partner['text'], partner['len'])} (F: {partner['freq']:,.2f}, Q: {partner['qty']:,})".replace(',', ' '))
+                    
+                    if partner.get('categories'):
+                        categories_str = ", ".join(partner['categories'])
+                        st.markdown(f"**Категории:** {categories_str}")
+
                     st.markdown(f"**Результат (В):** {get_relaxed_signature(result['text'], result['len'])} (F: {result['freq']:,.2f}, Q: {result['qty']:,})".replace(',', ' '))
+                    
+                    if result.get('categories'):
+                        categories_str = ", ".join(result['categories'])
+                        st.markdown(f"**Категории:** {categories_str}")
+
                     st.markdown("**Примеры для результата (В):**")
                     examples = get_pattern_examples(result['id'])
                     if examples:

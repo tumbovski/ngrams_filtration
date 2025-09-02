@@ -162,18 +162,29 @@ def get_relaxed_signature(full_signature, length):
 
 def get_pattern_by_id(pattern_id):
     """
-    Получает полную информацию о паттерне по его ID.
+    Получает полную информацию о паттерне по его ID, включая категории.
     Создает собственное подключение, чтобы быть кэшируемой функцией.
     """
     conn = get_db_connection()
     if not conn: return None
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, pattern_text, phrase_length, total_frequency, total_quantity FROM unique_patterns WHERE id = %s", (pattern_id,))
+            cur.execute("""
+                SELECT 
+                    up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
+                    (
+                        SELECT array_agg(pc.name ORDER BY pc.name)
+                        FROM pattern_category_associations pca
+                        JOIN pattern_categories pc ON pca.category_id = pc.id
+                        WHERE pca.pattern_id = up.id
+                    ) as categories
+                FROM unique_patterns up 
+                WHERE up.id = %s
+            """, (pattern_id,))
             p = cur.fetchone()
             if p:
                 relaxed_sig = get_relaxed_signature(p[1], p[2])
-                return {"id": p[0], "text": p[1], "len": p[2], "freq": p[3], "qty": p[4], "relaxed_sig": relaxed_sig}
+                return {"id": p[0], "text": p[1], "len": p[2], "freq": p[3], "qty": p[4], "categories": p[5] or [], "relaxed_sig": relaxed_sig}
             return None
     except Exception as e:
         print(f"Ошибка при получении паттерна по ID: {e}")
@@ -191,7 +202,14 @@ def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequen
     try:
         with conn.cursor() as cur:
             query = """
-                SELECT up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity
+                SELECT 
+                    up.id, up.pattern_text, up.phrase_length, up.total_frequency, up.total_quantity,
+                    (
+                        SELECT array_agg(pc.name ORDER BY pc.name)
+                        FROM pattern_category_associations pca
+                        JOIN pattern_categories pc ON pca.category_id = pc.id
+                        WHERE pca.pattern_id = up.id
+                    ) as categories
                 FROM unique_patterns up
                 LEFT JOIN moderation_patterns mp ON up.id = mp.pattern_id AND mp.user_id = %(user_id)s
                 WHERE mp.id IS NULL
@@ -217,7 +235,8 @@ def get_next_unmoderated_pattern(conn, user_id, phrase_length, min_total_frequen
             if pattern:
                 return {
                     "id": pattern[0], "pattern_text": pattern[1], "phrase_length": pattern[2],
-                    "total_frequency": pattern[3], "total_quantity": pattern[4]
+                    "total_frequency": pattern[3], "total_quantity": pattern[4],
+                    "categories": pattern[5] or []
                 }
             return None
     except Exception as e:
@@ -754,7 +773,7 @@ def find_next_merge_candidate_group(conn, already_seen_ids=None):
         return None
 
 def get_patterns_data_by_ids(conn, pattern_ids):
-    """Получает подробные данные для списка ID паттернов."""
+    """Получает поeдробные данные для списка ID паттернов."""
     if not conn or not pattern_ids: return []
     try:
         with conn.cursor() as cur:
@@ -770,7 +789,13 @@ def get_patterns_data_by_ids(conn, pattern_ids):
                             ORDER BY example_frequency DESC
                             LIMIT 50
                         ) pe
-                    ) as examples
+                    ) as examples,
+                    (
+                        SELECT array_agg(pc.name ORDER BY pc.name)
+                        FROM pattern_category_associations pca
+                        JOIN pattern_categories pc ON pca.category_id = pc.id
+                        WHERE pca.pattern_id = up.id
+                    ) as categories
                 FROM unique_patterns up
                 WHERE up.id = ANY(%s)
                 ORDER BY up.total_frequency DESC;
@@ -784,7 +809,8 @@ def get_patterns_data_by_ids(conn, pattern_ids):
                     "len": row[2],
                     "freq": row[3],
                     "qty": row[4],
-                    "examples": row[5] or []
+                    "examples": row[5] or [],
+                    "categories": row[6] or []
                 })
             return results
     except Exception as e:
@@ -1070,7 +1096,13 @@ def get_patterns_data_by_ids(conn, pattern_ids):
                             ORDER BY example_frequency DESC
                             LIMIT 50
                         ) pe
-                    ) as examples
+                    ) as examples,
+                    (
+                        SELECT array_agg(pc.name ORDER BY pc.name)
+                        FROM pattern_category_associations pca
+                        JOIN pattern_categories pc ON pca.category_id = pc.id
+                        WHERE pca.pattern_id = up.id
+                    ) as categories
                 FROM unique_patterns up
                 WHERE up.id = ANY(%s)
                 ORDER BY up.total_frequency DESC;
@@ -1084,7 +1116,8 @@ def get_patterns_data_by_ids(conn, pattern_ids):
                     "len": row[2],
                     "freq": row[3],
                     "qty": row[4],
-                    "examples": row[5] or []
+                    "examples": row[5] or [],
+                    "categories": row[6] or []
                 })
             return results
     except Exception as e:
@@ -1230,12 +1263,24 @@ def get_category_tree(conn):
     if not conn:
         return []
     try:
+        # убедимся, что клиент в UTF8
+        conn.set_client_encoding('UTF8')
+
         with conn.cursor() as cur:
             cur.execute("SELECT id, name, description, parent_category_id FROM public.pattern_categories ORDER BY name")
             all_categories = cur.fetchall()
-            
-            cat_map = {cat[0]: {"id": cat[0], "name": cat[1], "description": cat[2], "parent_id": cat[3], "children": []} for cat in all_categories}
-            
+
+            cat_map = {}
+            for cat in all_categories:
+                desc = cat[2].decode("utf-8") if isinstance(cat[2], bytes) else cat[2]
+                cat_map[cat[0]] = {
+                    "id": cat[0],
+                    "name": cat[1],
+                    "description": desc,
+                    "parent_id": cat[3],
+                    "children": []
+                }
+
             tree = []
             for cat_id, cat_data in cat_map.items():
                 if cat_data["parent_id"] is None:
@@ -1244,17 +1289,20 @@ def get_category_tree(conn):
                     parent = cat_map.get(cat_data["parent_id"])
                     if parent:
                         parent["children"].append(cat_data)
+
             return tree
     except Exception as e:
         print(f"Ошибка при построении дерева категорий: {e}")
         return []
 
-def get_patterns_for_category(conn, category_id):
+
+def get_patterns_for_category(conn, category_id, page=1, page_size=50):
     """
-    Получает все паттерны, связанные с определенной категорией.
+    Получает пагинированный список паттернов для определенной категории.
     """
     if not conn or not category_id:
         return []
+    offset = (page - 1) * page_size
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -1262,9 +1310,29 @@ def get_patterns_for_category(conn, category_id):
                 FROM public.unique_patterns up
                 JOIN public.pattern_category_associations pca ON up.id = pca.pattern_id
                 WHERE pca.category_id = %s
-                ORDER BY up.total_frequency DESC;
-            """, (category_id,))
+                ORDER BY up.total_frequency DESC
+                LIMIT %s OFFSET %s;
+            """, (category_id, page_size, offset))
             return [{"id": row[0], "text": row[1], "freq": row[2], "qty": row[3]} for row in cur.fetchall()]
     except Exception as e:
         print(f"Ошибка при получении паттернов для категории {category_id}: {e}")
         return []
+
+def count_patterns_for_category(conn, category_id):
+    """
+    Считает количество паттернов в определенной категории.
+    """
+    if not conn or not category_id:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(pca.pattern_id)
+                FROM public.pattern_category_associations pca
+                WHERE pca.category_id = %s;
+            """, (category_id,))
+            count = cur.fetchone()
+            return count[0] if count else 0
+    except Exception as e:
+        print(f"Ошибка при подсчете паттернов для категории {category_id}: {e}")
+        return 0
